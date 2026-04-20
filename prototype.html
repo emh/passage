@@ -1,0 +1,2450 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#FFFFF8">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<title>passage</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Crimson+Pro:ital,wght@0,300;0,400;0,500;0,600;1,300;1,400&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>
+:root {
+  --paper: #FFFFF8;
+  --ink: #111;
+  --ink-mid: #555;
+  --ink-light: #999;
+  --ink-faint: #ccc;
+  --red: #8B0000;
+  --red-light: #a52a2a;
+  --rule: #e0dcd6;
+  --hover: rgba(0,0,0,0.02);
+  --font: 'Crimson Pro', 'Palatino Linotype', Palatino, Georgia, serif;
+  --mono: 'SF Mono', 'Menlo', 'Consolas', 'Liberation Mono', monospace;
+  --ease: cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+*, *::before, *::after {
+  margin: 0; padding: 0; box-sizing: border-box;
+  -webkit-tap-highlight-color: transparent;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  font-family: var(--font);
+  font-size: 17px;
+  line-height: 1.6;
+  color: var(--ink);
+  background: var(--paper);
+  overflow-x: hidden;
+  overscroll-behavior-y: contain;
+  min-height: 100dvh;
+}
+
+body.no-scroll { overflow: hidden; }
+
+button, input, textarea, select { font: inherit; }
+button { color: inherit; background: none; border: none; cursor: pointer; }
+
+/* ─── App shell ─── */
+
+main {
+  max-width: 640px;
+  margin: 0 auto;
+  padding: 0 24px 80px;
+  padding-top: env(safe-area-inset-top, 0);
+}
+
+@media (min-width: 700px) {
+  main { padding: 0 40px 80px; padding-top: env(safe-area-inset-top, 0); }
+}
+
+/* ─── Header ─── */
+
+header {
+  padding-top: 48px;
+  margin-bottom: 28px;
+}
+
+h1 {
+  font-family: var(--font);
+  font-size: 44px;
+  font-weight: 300;
+  font-style: italic;
+  line-height: 1;
+  letter-spacing: -0.01em;
+  margin-bottom: 6px;
+}
+
+@media (max-width: 380px) {
+  h1 { font-size: 36px; }
+}
+
+.stats {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0;
+  color: var(--ink-light);
+}
+
+/* ─── Input ─── */
+
+.input-wrap {
+  position: relative;
+  margin-bottom: 28px;
+}
+
+.main-input {
+  width: 100%;
+  padding: 10px 0;
+  border: none;
+  border-bottom: 1px solid var(--rule);
+  outline: none;
+  background: transparent;
+  color: var(--ink);
+  font-family: var(--font);
+  font-size: 16px;
+  font-style: italic;
+  transition: border-color 0.2s;
+}
+
+.main-input:focus { border-bottom-color: var(--ink); }
+.main-input::placeholder { color: var(--ink-faint); font-style: italic; }
+
+.input-progress {
+  position: absolute;
+  bottom: 0; left: 0;
+  width: 100%; height: 1px;
+  background: var(--red);
+  transform: scaleX(0);
+  transform-origin: left center;
+  pointer-events: none;
+  transition: transform 0.3s var(--ease);
+}
+
+.input-status {
+  min-height: 18px;
+  margin-top: 4px;
+  color: var(--ink-light);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0;
+  line-height: 1.35;
+}
+
+/* ─── Filter tabs ─── */
+
+.nav {
+  display: flex;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+  gap: 0;
+}
+
+.nav-item {
+  padding: 6px 0;
+  margin-right: 18px;
+  color: var(--ink-light);
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 400;
+  transition: color 0.15s;
+  white-space: nowrap;
+}
+
+.nav-item:hover { color: var(--ink-mid); }
+.nav-item.active { color: var(--ink); }
+
+.sort-row {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 8px;
+}
+
+.sort-control {
+  padding: 4px 0;
+  color: var(--ink-light);
+  cursor: pointer;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0;
+  user-select: none;
+  transition: color 0.15s;
+}
+
+.sort-control:hover { color: var(--ink-mid); }
+
+/* ─── Trip list ─── */
+
+.trip-item {
+  padding: 22px 0;
+  border-top: 1px solid var(--rule);
+  cursor: pointer;
+  transition: opacity 0.2s;
+  position: relative;
+}
+
+.trip-item:last-child { border-bottom: 1px solid var(--rule); }
+.trip-item:active { opacity: 0.55; }
+
+.trip-meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 6px;
+  color: var(--ink-light);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0;
+}
+
+.trip-meta .right { text-align: right; }
+
+.trip-title {
+  font-size: 20px;
+  font-weight: 500;
+  line-height: 1.28;
+  margin-bottom: 4px;
+}
+
+.trip-route {
+  font-size: 15px;
+  color: var(--ink-mid);
+  line-height: 1.45;
+  margin-bottom: 6px;
+}
+
+.trip-counts {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0;
+  color: var(--ink-light);
+}
+
+.trip-item.archived .trip-title,
+.trip-item.archived .trip-route { color: var(--ink-mid); }
+
+.trip-item.archived { opacity: 0.65; }
+
+/* ─── Overlays ─── */
+
+.overlay {
+  position: fixed;
+  z-index: 100;
+  inset: 0;
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
+  visibility: hidden;
+  background: var(--paper);
+  transform: translateX(100%);
+  transition: transform 0.35s var(--ease), visibility 0s linear 0.35s;
+  -webkit-overflow-scrolling: touch;
+}
+
+.overlay.active {
+  visibility: visible;
+  transform: translateX(0);
+  transition: transform 0.35s var(--ease), visibility 0s linear 0s;
+}
+
+#trip-overlay { z-index: 100; }
+#entry-overlay { z-index: 150; }
+#compose-overlay { z-index: 200; }
+#share-overlay { z-index: 200; }
+
+/* Trip overlay has a sticky map at the top */
+
+.trip-layout {
+  display: flex;
+  flex-direction: column;
+  min-height: 100dvh;
+}
+
+.trip-map-wrap {
+  position: relative;
+  flex: 0 0 auto;
+  height: 38dvh;
+  min-height: 200px;
+  max-height: 360px;
+  background: var(--paper);
+}
+
+.trip-map-wrap::after {
+  content: '';
+  position: absolute;
+  bottom: 0; left: 0; right: 0;
+  height: 1px;
+  background: var(--rule);
+  z-index: 500;
+  pointer-events: none;
+}
+
+.trip-map { height: 100%; width: 100%; }
+
+.leaflet-tile-pane {
+  filter: saturate(0.15) brightness(1.06) contrast(0.88) sepia(0.05);
+}
+
+.leaflet-container { font-family: var(--font) !important; background: var(--paper) !important; }
+
+.leaflet-control-attribution {
+  background: rgba(255, 255, 248, 0.85) !important;
+  color: var(--ink-light) !important;
+  font-family: var(--mono) !important;
+  font-size: 9px !important;
+}
+
+.leaflet-control-attribution a { color: var(--ink-light) !important; }
+
+.entry-tooltip {
+  font-family: var(--font) !important;
+  font-size: 13px !important;
+  color: var(--ink) !important;
+  background: var(--paper) !important;
+  border: 1px solid var(--rule) !important;
+  border-radius: 0 !important;
+  padding: 6px 10px !important;
+  box-shadow: none !important;
+}
+
+.entry-tooltip::before { display: none !important; }
+
+.leaflet-control-zoom a {
+  font-family: var(--font) !important;
+  background: var(--paper) !important;
+  color: var(--ink-mid) !important;
+  border: 1px solid var(--rule) !important;
+  border-radius: 0 !important;
+}
+
+.leaflet-control-zoom a:hover { color: var(--ink) !important; background: var(--paper) !important; }
+
+/* Trip header / body below map */
+
+.trip-body {
+  flex: 1;
+  max-width: 640px;
+  margin: 0 auto;
+  width: 100%;
+  padding: 28px 24px 100px;
+}
+
+@media (min-width: 700px) {
+  .trip-body { padding: 28px 40px 100px; }
+}
+
+.back-btn {
+  display: inline-block;
+  padding: 12px 16px 12px 0;
+  margin-bottom: 16px;
+  color: var(--ink-light);
+  font-family: var(--font);
+  font-size: 15px;
+  transition: color 0.15s;
+  user-select: none;
+}
+
+.back-btn:hover { color: var(--ink); }
+
+.trip-head-dates {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0;
+  color: var(--ink-light);
+  margin-bottom: 4px;
+  display: flex;
+  justify-content: space-between;
+}
+
+.trip-head-title {
+  font-size: 30px;
+  font-weight: 400;
+  font-style: italic;
+  line-height: 1.2;
+  margin-bottom: 10px;
+}
+
+@media (max-width: 380px) {
+  .trip-head-title { font-size: 26px; }
+}
+
+.trip-head-route {
+  font-size: 16px;
+  color: var(--ink-mid);
+  margin-bottom: 8px;
+}
+
+.trip-head-people {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0;
+  color: var(--ink-light);
+  margin-bottom: 20px;
+}
+
+.trip-head-people .you { color: var(--ink-mid); }
+
+.action-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 20px;
+  align-items: baseline;
+  margin-bottom: 20px;
+}
+
+.action-link {
+  display: inline-block;
+  padding: 10px 0;
+  color: var(--red);
+  font-family: var(--font);
+  font-size: 15px;
+  transition: color 0.15s;
+  user-select: none;
+  background: none;
+  border: none;
+  cursor: pointer;
+}
+
+.action-link:hover { color: var(--red-light); }
+.action-link.muted { color: var(--ink-light); }
+.action-link.muted:hover { color: var(--ink-mid); }
+
+.detail-rule {
+  margin: 22px 0;
+  border: none;
+  border-top: 1px solid var(--rule);
+}
+
+.section-label {
+  margin-bottom: 14px;
+  color: var(--ink-light);
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+/* ─── Timeline ─── */
+
+.timeline-filter-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0;
+  margin-bottom: 4px;
+}
+
+.filter-item {
+  padding: 4px 0;
+  margin-right: 14px;
+  color: var(--ink-light);
+  cursor: pointer;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0;
+  transition: color 0.15s;
+  white-space: nowrap;
+}
+
+.filter-item:hover { color: var(--ink-mid); }
+.filter-item.active { color: var(--ink); }
+
+.day-group {
+  padding-top: 18px;
+}
+
+.day-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  padding: 12px 0 4px;
+  border-top: 1px solid var(--rule);
+  margin-top: 4px;
+}
+
+.day-header .day-label {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  color: var(--ink-light);
+  text-transform: uppercase;
+}
+
+.day-header .day-places {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0;
+  color: var(--ink-faint);
+  text-transform: uppercase;
+}
+
+.entry {
+  position: relative;
+  padding: 14px 0 18px 20px;
+  cursor: pointer;
+  transition: opacity 0.2s;
+}
+
+.entry:active { opacity: 0.6; }
+
+.entry::before {
+  content: '';
+  position: absolute;
+  left: 4px; top: 22px; bottom: 0;
+  width: 1px;
+  background: var(--rule);
+}
+
+.entry:last-child::before { bottom: 14px; }
+
+.entry::after {
+  content: '';
+  position: absolute;
+  left: 0; top: 20px;
+  width: 9px; height: 9px;
+  border-radius: 50%;
+  background: var(--paper);
+  border: 1px solid var(--ink-faint);
+}
+
+.entry.mine::after { border-color: var(--ink-mid); }
+.entry.is-private::after {
+  background: var(--red);
+  border-color: var(--red);
+}
+
+.entry-meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 6px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0;
+  color: var(--ink-light);
+}
+
+.entry-meta .type { color: var(--ink-mid); }
+.entry-meta .private-tag { color: var(--red); }
+.entry-meta .author { color: var(--ink-light); }
+
+.entry-body {
+  font-size: 15.5px;
+  line-height: 1.55;
+  color: var(--ink);
+}
+
+.entry-journal p {
+  margin-bottom: 8px;
+}
+
+.entry-journal p:last-child { margin-bottom: 0; }
+
+.entry-link {
+  display: block;
+  padding: 12px 14px;
+  margin-top: 4px;
+  border: 1px solid var(--rule);
+  background: var(--hover);
+  transition: border-color 0.15s;
+}
+
+.entry-link:hover { border-color: var(--ink-faint); }
+
+.entry-link-title {
+  font-size: 15px;
+  font-weight: 500;
+  line-height: 1.3;
+  margin-bottom: 4px;
+}
+
+.entry-link-desc {
+  font-size: 14px;
+  color: var(--ink-mid);
+  line-height: 1.45;
+  margin-bottom: 6px;
+}
+
+.entry-link-domain {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0;
+  color: var(--ink-light);
+}
+
+.entry-photo {
+  margin-top: 4px;
+  position: relative;
+  display: block;
+  max-width: 100%;
+  max-height: 340px;
+  overflow: hidden;
+  background: var(--ink-faint);
+}
+
+.entry-photo img {
+  display: block;
+  width: 100%;
+  height: auto;
+  object-fit: cover;
+  filter: saturate(0.85);
+}
+
+.entry-photo-caption {
+  margin-top: 6px;
+  font-size: 14px;
+  color: var(--ink-mid);
+  font-style: italic;
+  line-height: 1.45;
+}
+
+.entry-footer {
+  margin-top: 8px;
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0;
+  color: var(--ink-light);
+}
+
+.entry-footer .footer-link {
+  color: var(--ink-light);
+  cursor: pointer;
+  transition: color 0.15s;
+}
+
+.entry-footer .footer-link:hover { color: var(--ink); }
+
+/* ─── Entry detail overlay ─── */
+
+.entry-detail-body {
+  max-width: 640px;
+  margin: 0 auto;
+  padding: 32px 24px 100px;
+}
+
+@media (min-width: 700px) {
+  .entry-detail-body { padding: 32px 40px 100px; }
+}
+
+.entry-detail-meta {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0;
+  color: var(--ink-light);
+  margin-bottom: 6px;
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.entry-detail-meta .author { color: var(--ink-mid); }
+.entry-detail-meta .private-tag { color: var(--red); }
+
+.entry-detail-content {
+  font-size: 17px;
+  line-height: 1.65;
+}
+
+.entry-detail-content p { margin-bottom: 14px; }
+.entry-detail-content p:last-child { margin-bottom: 0; }
+
+.entry-detail-content img,
+.entry-detail-photo {
+  display: block;
+  width: 100%;
+  height: auto;
+  margin: 16px 0;
+  filter: saturate(0.85);
+}
+
+.entry-detail-title {
+  font-size: 26px;
+  font-weight: 400;
+  font-style: italic;
+  line-height: 1.25;
+  margin-bottom: 14px;
+}
+
+.entry-location {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0;
+  color: var(--ink-light);
+  margin-bottom: 20px;
+}
+
+/* ─── Comments ─── */
+
+.comments-section {
+  margin-top: 32px;
+  padding-top: 20px;
+  border-top: 1px solid var(--rule);
+}
+
+.comment {
+  padding: 14px 0;
+  border-bottom: 1px solid var(--rule);
+}
+
+.comment:last-child { border-bottom: none; }
+
+.comment-meta {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0;
+  color: var(--ink-light);
+  margin-bottom: 4px;
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.comment-author { color: var(--ink-mid); }
+
+.comment-body {
+  font-size: 15px;
+  line-height: 1.55;
+  color: var(--ink);
+}
+
+.comment-compose {
+  margin-top: 18px;
+  padding-top: 18px;
+  border-top: 1px solid var(--rule);
+}
+
+.comment-textarea {
+  width: 100%;
+  min-height: 70px;
+  padding: 10px 0;
+  border: none;
+  border-bottom: 1px solid var(--rule);
+  outline: none;
+  background: transparent;
+  color: var(--ink);
+  font-family: var(--font);
+  font-size: 16px;
+  resize: none;
+  transition: border-color 0.2s;
+}
+
+.comment-textarea:focus { border-bottom-color: var(--ink); }
+.comment-textarea::placeholder { color: var(--ink-faint); font-style: italic; }
+
+/* ─── Compose overlay (add entry) ─── */
+
+.compose-body {
+  max-width: 640px;
+  margin: 0 auto;
+  padding: 32px 24px 100px;
+}
+
+@media (min-width: 700px) {
+  .compose-body { padding: 32px 40px 100px; }
+}
+
+.compose-title {
+  font-size: 28px;
+  font-weight: 400;
+  font-style: italic;
+  margin-bottom: 20px;
+  line-height: 1.2;
+}
+
+.type-toggle {
+  display: flex;
+  gap: 0;
+  margin-bottom: 24px;
+  border-top: 1px solid var(--rule);
+  border-bottom: 1px solid var(--rule);
+}
+
+.type-option {
+  flex: 1;
+  padding: 14px 8px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--ink-light);
+  cursor: pointer;
+  text-align: center;
+  transition: color 0.15s, background 0.15s;
+}
+
+.type-option + .type-option { border-left: 1px solid var(--rule); }
+
+.type-option:hover { color: var(--ink-mid); }
+.type-option.active { color: var(--ink); background: var(--hover); }
+
+.field {
+  margin-bottom: 20px;
+}
+
+.field-label {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--ink-light);
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.field-input,
+.field-textarea {
+  width: 100%;
+  padding: 8px 0;
+  border: none;
+  border-bottom: 1px solid var(--rule);
+  outline: none;
+  background: transparent;
+  color: var(--ink);
+  font-family: var(--font);
+  font-size: 16px;
+  transition: border-color 0.2s;
+}
+
+.field-textarea {
+  min-height: 140px;
+  resize: vertical;
+  font-size: 17px;
+  line-height: 1.55;
+}
+
+.field-input:focus,
+.field-textarea:focus { border-bottom-color: var(--ink); }
+
+.field-input::placeholder,
+.field-textarea::placeholder { color: var(--ink-faint); font-style: italic; }
+
+.photo-drop {
+  padding: 40px 20px;
+  border: 1px dashed var(--rule);
+  text-align: center;
+  color: var(--ink-light);
+  font-style: italic;
+  font-size: 15px;
+  margin-bottom: 20px;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s;
+}
+
+.photo-drop:hover {
+  border-color: var(--ink-faint);
+  color: var(--ink-mid);
+}
+
+.photo-preview {
+  margin-bottom: 20px;
+  width: 100%;
+  max-height: 280px;
+  object-fit: cover;
+  filter: saturate(0.85);
+}
+
+.field-helper {
+  margin-top: 6px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0;
+  color: var(--ink-light);
+}
+
+.field-helper.accent { color: var(--red); }
+
+.toggle-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 0;
+  border-top: 1px solid var(--rule);
+}
+
+.toggle-row:last-child { border-bottom: 1px solid var(--rule); }
+
+.toggle-label {
+  font-size: 15px;
+  color: var(--ink);
+}
+
+.toggle-sub {
+  display: block;
+  margin-top: 2px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0;
+  color: var(--ink-light);
+}
+
+.toggle {
+  width: 36px;
+  height: 18px;
+  border: 1px solid var(--rule);
+  position: relative;
+  cursor: pointer;
+  background: var(--paper);
+  flex: 0 0 auto;
+  transition: border-color 0.2s, background 0.2s;
+}
+
+.toggle::after {
+  content: '';
+  position: absolute;
+  top: 2px; left: 2px;
+  width: 12px; height: 12px;
+  background: var(--ink-faint);
+  transition: transform 0.2s var(--ease), background 0.2s;
+}
+
+.toggle.on {
+  border-color: var(--red);
+  background: var(--red);
+}
+
+.toggle.on::after {
+  transform: translateX(18px);
+  background: var(--paper);
+}
+
+/* ─── Share overlay ─── */
+
+.share-body {
+  max-width: 640px;
+  margin: 0 auto;
+  padding: 32px 24px 100px;
+}
+
+@media (min-width: 700px) {
+  .share-body { padding: 32px 40px 100px; }
+}
+
+.collab-item {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 0;
+  border-top: 1px solid var(--rule);
+}
+
+.collab-item:last-child { border-bottom: 1px solid var(--rule); }
+
+.collab-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.collab-name {
+  font-size: 16px;
+  color: var(--ink);
+  margin-bottom: 2px;
+}
+
+.collab-email {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0;
+  color: var(--ink-light);
+}
+
+.collab-role {
+  position: relative;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0;
+  color: var(--ink-mid);
+  cursor: pointer;
+  padding: 4px 0;
+  text-transform: uppercase;
+}
+
+.collab-role::after {
+  content: '  ◆';
+  color: var(--ink-faint);
+  margin-left: 2px;
+  font-size: 8px;
+}
+
+.collab-role:hover { color: var(--ink); }
+
+.public-link-box {
+  margin-top: 24px;
+  padding: 16px;
+  border: 1px solid var(--rule);
+  background: var(--hover);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  letter-spacing: 0;
+  color: var(--ink-mid);
+  word-break: break-all;
+  line-height: 1.5;
+}
+
+/* ─── Toast ─── */
+
+.toast {
+  position: fixed;
+  z-index: 9999;
+  bottom: calc(28px + env(safe-area-inset-bottom, 0));
+  left: 50%;
+  padding: 8px 20px;
+  border: 1px solid var(--rule);
+  opacity: 0;
+  pointer-events: none;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0;
+  transform: translateX(-50%) translateY(20px);
+  transition: opacity 0.3s, transform 0.3s var(--ease);
+  white-space: nowrap;
+}
+
+.toast.visible {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}
+
+/* ─── Empty state ─── */
+
+.empty-state {
+  padding: 40px 0;
+  color: var(--ink-light);
+  font-size: 15px;
+  font-style: italic;
+  text-align: center;
+}
+
+/* ─── Animations ─── */
+
+@keyframes fadeSlideIn {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.animate-in {
+  animation: fadeSlideIn 0.45s var(--ease) both;
+}
+
+/* stagger */
+.animate-in:nth-child(1) { animation-delay: 0.00s; }
+.animate-in:nth-child(2) { animation-delay: 0.05s; }
+.animate-in:nth-child(3) { animation-delay: 0.10s; }
+.animate-in:nth-child(4) { animation-delay: 0.15s; }
+.animate-in:nth-child(5) { animation-delay: 0.20s; }
+.animate-in:nth-child(6) { animation-delay: 0.25s; }
+.animate-in:nth-child(7) { animation-delay: 0.30s; }
+.animate-in:nth-child(8) { animation-delay: 0.35s; }
+
+</style>
+</head>
+<body>
+
+<main id="app">
+  <header>
+    <h1>passage</h1>
+    <p class="stats" id="stats">loading…</p>
+  </header>
+
+  <div class="input-wrap">
+    <input
+      class="main-input"
+      id="main-input"
+      type="text"
+      placeholder="new trip, or search…"
+      autocomplete="off"
+      spellcheck="false"
+    />
+    <div class="input-progress" id="input-progress"></div>
+    <div class="input-status" id="input-status"></div>
+  </div>
+
+  <div class="nav" id="nav">
+    <div class="nav-item active" data-filter="all">All</div>
+    <div class="nav-item" data-filter="mine">Mine</div>
+    <div class="nav-item" data-filter="shared">Shared with me</div>
+    <div class="nav-item" data-filter="active">Active</div>
+    <div class="nav-item" data-filter="past">Past</div>
+  </div>
+
+  <div class="sort-row">
+    <button class="sort-control" id="sort-control">recent</button>
+  </div>
+
+  <div id="trip-list"></div>
+  <div class="empty-state" id="empty-state" style="display:none;">no trips yet — write one above.</div>
+</main>
+
+<!-- Trip detail overlay -->
+<div class="overlay" id="trip-overlay">
+  <div class="trip-layout">
+    <div class="trip-map-wrap">
+      <div class="trip-map" id="trip-map"></div>
+    </div>
+    <div class="trip-body" id="trip-body"></div>
+  </div>
+</div>
+
+<!-- Entry detail overlay -->
+<div class="overlay" id="entry-overlay">
+  <div class="entry-detail-body" id="entry-body"></div>
+</div>
+
+<!-- Compose overlay (add entry) -->
+<div class="overlay" id="compose-overlay">
+  <div class="compose-body" id="compose-body"></div>
+</div>
+
+<!-- Share overlay -->
+<div class="overlay" id="share-overlay">
+  <div class="share-body" id="share-body"></div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+// ─────────────────────────────────────────────────────────────────────
+// Utilities
+// ─────────────────────────────────────────────────────────────────────
+
+const $ = id => document.getElementById(id);
+const esc = v => {
+  const d = document.createElement('div');
+  d.textContent = v == null ? '' : String(v);
+  return d.innerHTML;
+};
+
+const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+const DAYS = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+
+function fmtDate(iso) {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return '—';
+  const now = new Date();
+  const label = `${MONTHS[d.getMonth()]} ${d.getDate()}`;
+  return d.getFullYear() === now.getFullYear() ? label : `${label}, ${d.getFullYear()}`;
+}
+
+function fmtDateRange(startIso, endIso) {
+  const s = new Date(startIso);
+  const e = new Date(endIso);
+  if (s.getMonth() === e.getMonth() && s.getFullYear() === e.getFullYear()) {
+    return `${MONTHS[s.getMonth()].toUpperCase()} ${s.getDate()}—${e.getDate()}`;
+  }
+  return `${MONTHS[s.getMonth()].toUpperCase()} ${s.getDate()} — ${MONTHS[e.getMonth()].toUpperCase()} ${e.getDate()}`;
+}
+
+function fmtDayLabel(iso) {
+  const d = new Date(iso);
+  return `${DAYS[d.getDay()].toUpperCase()} · ${MONTHS[d.getMonth()].toUpperCase()} ${d.getDate()}`;
+}
+
+function fmtTime(iso) {
+  const d = new Date(iso);
+  let h = d.getHours();
+  const m = d.getMinutes().toString().padStart(2, '0');
+  const ampm = h >= 12 ? 'pm' : 'am';
+  h = h % 12; if (h === 0) h = 12;
+  return `${h}:${m}${ampm}`;
+}
+
+function daysBetween(a, b) {
+  const ms = new Date(b) - new Date(a);
+  return Math.max(1, Math.round(ms / 86400000) + 1);
+}
+
+function dayKey(iso) {
+  const d = new Date(iso);
+  return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+}
+
+function relativeTime(iso) {
+  const now = new Date();
+  const d = new Date(iso);
+  const mins = Math.floor((now - d) / 60000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  const days = Math.floor(hrs / 24);
+  if (days < 30) return `${days}d ago`;
+  return fmtDate(iso);
+}
+
+let toastTimer;
+function toast(msg) {
+  const el = $('toast');
+  el.textContent = msg;
+  el.classList.add('visible');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.remove('visible'), 2000);
+}
+
+function isUrl(value) {
+  const t = value.trim();
+  if (t.includes(' ') || t.length < 4) return false;
+  return /^https?:\/\//i.test(t) || /^[a-z0-9][-a-z0-9]*\.[a-z]{2,}/i.test(t);
+}
+
+// Simple unicode-safe base64 for public link demo
+function slug(str) {
+  return str.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Seed data
+// ─────────────────────────────────────────────────────────────────────
+
+const ME = { id: 'me', name: 'Evan', email: 'evanhaveman@gmail.com' };
+const MAYA = { id: 'maya', name: 'Maya Park', email: 'maya.p@hey.com' };
+const TOBIN = { id: 'tobin', name: 'Tobin Rourke', email: 'tobin@rourke.land' };
+const ASTRID = { id: 'astrid', name: 'Astrid Vale', email: 'astrid.vale@gmail.com' };
+
+const PEOPLE = Object.fromEntries([ME, MAYA, TOBIN, ASTRID].map(p => [p.id, p]));
+
+// Trips
+
+const trips = [
+  {
+    id: 't-adriatic',
+    title: 'Adriatic Crossing',
+    owner: ME.id,
+    startIso: '2026-04-12',
+    endIso: '2026-04-22',
+    cities: ['Venice', 'Split', 'Dubrovnik'],
+    collaborators: [
+      { userId: MAYA.id, role: 'collaborator' }
+    ],
+    readers: [],
+    publicLink: null,
+    cover: null
+  },
+  {
+    id: 't-kyoto',
+    title: 'Kyoto in spring',
+    owner: ME.id,
+    startIso: '2025-04-01',
+    endIso: '2025-04-10',
+    cities: ['Kyoto', 'Nara', 'Osaka'],
+    collaborators: [],
+    readers: [],
+    publicLink: 'passage.app/share/kyoto-2025-r9k3',
+    cover: null
+  },
+  {
+    id: 't-highlands',
+    title: 'Scottish highlands loop',
+    owner: ASTRID.id,
+    startIso: '2024-09-12',
+    endIso: '2024-09-20',
+    cities: ['Inverness', 'Skye', 'Glencoe'],
+    collaborators: [],
+    readers: [
+      { userId: ME.id, role: 'reader' },
+      { userId: TOBIN.id, role: 'reader' }
+    ],
+    publicLink: null,
+    cover: null
+  },
+  {
+    id: 't-lisbon',
+    title: 'Lisbon weekend',
+    owner: ME.id,
+    startIso: '2024-11-15',
+    endIso: '2024-11-18',
+    cities: ['Lisbon'],
+    collaborators: [
+      { userId: TOBIN.id, role: 'collaborator' }
+    ],
+    readers: [],
+    publicLink: null,
+    cover: null
+  }
+];
+
+// Entries — keyed by trip id. Rich for adriatic, sparse for others.
+
+const entries = {
+  't-adriatic': [
+    {
+      id: 'e-1', tripId: 't-adriatic', type: 'journal',
+      author: ME.id,
+      timestamp: '2026-04-12T23:14:00',
+      location: { lat: 45.4414, lng: 12.3205, name: 'Santa Lucia, Venice' },
+      title: 'Arrival, pre-dawn',
+      body: `Off the sleeper train at 4:47am and the station is a cathedral of nobody. Vaporetto ticket machines reject three cards before one works. The canal smells like salt and diesel and something sweet — bread already proving, probably.\n\nMaya is still asleep in a hotel two stops away. I walk the platform just to feel the cold. When I sit down the dispatcher gives me a bread roll for no reason at all.`,
+      private: false,
+      comments: []
+    },
+    {
+      id: 'e-2', tripId: 't-adriatic', type: 'photo',
+      author: ME.id,
+      timestamp: '2026-04-12T20:40:00',
+      location: { lat: 45.4267, lng: 12.3264, name: 'Giudecca, Venice' },
+      photoUrl: 'https://images.unsplash.com/photo-1531572753322-ad063cecc140?w=900',
+      caption: 'View from the hotel window, Giudecca. Low tide. The gulls have opinions.',
+      private: false,
+      comments: [
+        { id: 'c-1', author: MAYA.id, timestamp: '2026-04-13T09:12:00', body: 'this made me want to redo our flight' }
+      ]
+    },
+    {
+      id: 'e-3', tripId: 't-adriatic', type: 'link',
+      author: MAYA.id,
+      timestamp: '2026-04-13T11:47:00',
+      location: { lat: 45.4371, lng: 12.3326, name: 'Cannaregio, Venice' },
+      link: {
+        url: 'https://www.atlasobscura.com/articles/acqua-alta-venice-flooding',
+        title: 'Reading acqua alta: how Venetians tell the sea',
+        description: 'A quiet piece about siren codes, weather windows, and the language locals use for a tide that sometimes decides differently.',
+        site: 'atlasobscura.com'
+      },
+      private: false,
+      comments: []
+    },
+    {
+      id: 'e-4', tripId: 't-adriatic', type: 'photo',
+      author: ME.id,
+      timestamp: '2026-04-14T15:28:00',
+      location: { lat: 45.4340, lng: 12.3390, name: 'Squero San Trovaso, Venice' },
+      photoUrl: 'https://images.unsplash.com/photo-1523906834658-6e24ef2386f9?w=900',
+      caption: 'Forcola close-up. Walnut, they said, carved for a specific rower.',
+      private: false,
+      comments: [
+        { id: 'c-2', author: MAYA.id, timestamp: '2026-04-14T16:10:00', body: 'you can smell the wood from here' },
+        { id: 'c-3', author: ME.id, timestamp: '2026-04-14T16:45:00', body: 'the carver said ours would take three months' }
+      ]
+    },
+    {
+      id: 'e-5', tripId: 't-adriatic', type: 'journal',
+      author: ME.id,
+      timestamp: '2026-04-14T22:01:00',
+      location: { lat: 45.4408, lng: 12.3155, name: 'Cannaregio, Venice' },
+      title: 'Last night in Cannaregio',
+      body: `The bacari in Cannaregio are the ones you walk past in daylight and they look closed. At 9pm they're five-deep at the counter.\n\nTried the sarde in saor at Al Timon. Maya said it tasted of "someone's grandmother's forgiveness," which is the sort of sentence she's been producing all week.`,
+      private: false,
+      comments: []
+    },
+    {
+      id: 'e-6', tripId: 't-adriatic', type: 'journal',
+      author: ME.id,
+      timestamp: '2026-04-16T14:23:00',
+      location: { lat: 43.5081, lng: 16.4402, name: 'Riva, Split' },
+      title: 'Something I need to write down',
+      body: `The thing with Maya at lunch wasn't about the ferry. I know it wasn't. I'm writing this here because I'll be kinder about it in a week than I would be if I said it out loud now.\n\nShe's been sleeping badly since the crossing. I shouldn't have pushed about Hvar.`,
+      private: true,
+      comments: []
+    },
+    {
+      id: 'e-7', tripId: 't-adriatic', type: 'journal',
+      author: MAYA.id,
+      timestamp: '2026-04-16T19:05:00',
+      location: { lat: 43.5088, lng: 16.4407, name: 'Dvor, Split' },
+      title: 'Dinner at Dvor',
+      body: `The kind of meal where the waiter asks if you have time and you say yes because you're already saying yes to everything.\n\nOctopus carpaccio with smoked salt. A pošip I wrote down on a napkin and have since lost.`,
+      private: false,
+      comments: [
+        { id: 'c-4', author: ME.id, timestamp: '2026-04-16T23:40:00', body: 'the napkin is in your back left pocket' }
+      ]
+    },
+    {
+      id: 'e-8', tripId: 't-adriatic', type: 'photo',
+      author: MAYA.id,
+      timestamp: '2026-04-16T21:14:00',
+      location: { lat: 43.5082, lng: 16.4402, name: 'Peristyle, Split' },
+      photoUrl: 'https://images.unsplash.com/photo-1555990538-17392d1e2f1a?w=900',
+      caption: 'Peristyle at night. No one else there. We stayed too long.',
+      private: false,
+      comments: []
+    },
+    {
+      id: 'e-9', tripId: 't-adriatic', type: 'journal',
+      author: ME.id,
+      timestamp: '2026-04-18T09:15:00',
+      location: { lat: 43.5081, lng: 16.4344, name: 'Split ferry terminal' },
+      title: 'Early boat, coffee on deck',
+      body: `Jadrolinija at 7:30. The sea is the colour of a flat knife. Two older men are playing cards against the bulkhead with a kind of religious patience.\n\nCoffee from the deck bar tastes exactly like the coffee from every deck bar on every ferry since 1974. This is a compliment.`,
+      private: false,
+      comments: []
+    },
+    {
+      id: 'e-10', tripId: 't-adriatic', type: 'photo',
+      author: ME.id,
+      timestamp: '2026-04-18T14:48:00',
+      location: { lat: 42.7000, lng: 17.9500, name: 'Adriatic, approaching Dubrovnik' },
+      photoUrl: 'https://images.unsplash.com/photo-1555990793-da11153b2473?w=900',
+      caption: 'Approaching Dubrovnik. The first glimpse is always of the walls, then the red roofs, then everything.',
+      private: false,
+      comments: [
+        { id: 'c-5', author: MAYA.id, timestamp: '2026-04-18T14:52:00', body: 'the light is doing a thing' }
+      ]
+    },
+    {
+      id: 'e-11', tripId: 't-adriatic', type: 'journal',
+      author: MAYA.id,
+      timestamp: '2026-04-18T19:22:00',
+      location: { lat: 42.6412, lng: 18.1123, name: 'Old town, Dubrovnik' },
+      title: 'First night — the hotel mishap',
+      body: `Our booking was not for this week and the man at the desk was both very sorry and completely unable to care about it. Walked Stradun with both bags for an hour before finding somewhere. Ended up in a room above a bakery that starts at 4am and ends in dough.`,
+      private: false,
+      comments: []
+    },
+    {
+      id: 'e-12', tripId: 't-adriatic', type: 'link',
+      author: ME.id,
+      timestamp: '2026-04-19T10:03:00',
+      location: { lat: 42.6408, lng: 18.1092, name: 'Pile gate, Dubrovnik' },
+      link: {
+        url: 'https://www.eater.com/buza-bar-dubrovnik-cliff',
+        title: 'Buza Bar — the cliffside drink that almost isn\'t there',
+        description: 'A tiny hole in the wall (literally) on the seaward side of the old town. Best at golden hour, as everyone will tell you; better still in the early afternoon when nobody does.',
+        site: 'eater.com'
+      },
+      private: false,
+      comments: []
+    },
+    {
+      id: 'e-13', tripId: 't-adriatic', type: 'journal',
+      author: ME.id,
+      timestamp: '2026-04-19T16:12:00',
+      location: { lat: 42.6418, lng: 18.1102, name: 'City walls, Dubrovnik' },
+      title: 'Walking the walls',
+      body: `Two kilometres, they say, but with the heat and the stops it's closer to a pilgrimage. Every embrasure frames a different composition: a washing line, a palm, a boy on a scooter, the sea. The sea, the sea.\n\nMaya's knee is complaining. We sit at the Minčeta tower and eat two peaches from a paper bag.`,
+      private: false,
+      comments: [
+        { id: 'c-6', author: TOBIN.id, timestamp: '2026-04-19T18:01:00', body: 'jealous. please take me next time.' }
+      ]
+    },
+    {
+      id: 'e-14', tripId: 't-adriatic', type: 'photo',
+      author: MAYA.id,
+      timestamp: '2026-04-19T18:40:00',
+      location: { lat: 42.6402, lng: 18.1088, name: 'Od Domina, Dubrovnik' },
+      photoUrl: 'https://images.unsplash.com/photo-1555990538-32eec18b48a3?w=900',
+      caption: 'Old town stairs at dusk. The cats own these.',
+      private: false,
+      comments: []
+    }
+  ],
+  't-kyoto': [
+    {
+      id: 'k-1', tripId: 't-kyoto', type: 'journal', author: ME.id,
+      timestamp: '2025-04-02T08:20:00',
+      location: { lat: 35.0116, lng: 135.7681, name: 'Philosopher\'s path, Kyoto' },
+      title: 'Cherry blossom, morning shift',
+      body: 'Before the crowds. A heron stood in the canal as if it had rented it.',
+      private: false, comments: []
+    },
+    {
+      id: 'k-2', tripId: 't-kyoto', type: 'photo', author: ME.id,
+      timestamp: '2025-04-04T16:12:00',
+      location: { lat: 34.9948, lng: 135.7850, name: 'Fushimi Inari-taisha' },
+      photoUrl: 'https://images.unsplash.com/photo-1528360983277-13d401cdc186?w=900',
+      caption: 'The quiet gates — up past the first fork, almost no one.',
+      private: false, comments: []
+    }
+  ],
+  't-highlands': [
+    {
+      id: 'h-1', tripId: 't-highlands', type: 'journal', author: ASTRID.id,
+      timestamp: '2024-09-14T19:20:00',
+      location: { lat: 57.2725, lng: -6.2152, name: 'Portree, Skye' },
+      title: 'Portree, after the ferry',
+      body: 'Rain sideways for an hour then a double rainbow, on cue. Nobody clapped, which I respect.',
+      private: false, comments: []
+    }
+  ],
+  't-lisbon': []
+};
+
+// ─────────────────────────────────────────────────────────────────────
+// State
+// ─────────────────────────────────────────────────────────────────────
+
+const state = {
+  filter: 'all',
+  sort: 'recent',
+  search: '',
+  currentTripId: null,
+  currentEntryId: null,
+  composeType: 'journal',
+  composePrivate: false,
+  timelineFilter: 'all',
+  lastInputUrl: null
+};
+
+const SORT_MODES = ['recent', 'oldest', 'duration'];
+
+// ─────────────────────────────────────────────────────────────────────
+// Derived
+// ─────────────────────────────────────────────────────────────────────
+
+function tripEntries(tripId) {
+  return (entries[tripId] || []).slice().sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+}
+
+function visibleEntries(tripId) {
+  return tripEntries(tripId).filter(e => !e.private || e.author === ME.id);
+}
+
+function tripStats(tripId) {
+  const all = visibleEntries(tripId);
+  const photos = all.filter(e => e.type === 'photo').length;
+  const links = all.filter(e => e.type === 'link').length;
+  const journals = all.filter(e => e.type === 'journal').length;
+  return { total: all.length, photos, links, journals };
+}
+
+function tripRole(trip) {
+  if (trip.owner === ME.id) return 'owner';
+  const c = (trip.collaborators || []).find(x => x.userId === ME.id);
+  if (c) return 'collaborator';
+  const r = (trip.readers || []).find(x => x.userId === ME.id);
+  if (r) return 'reader';
+  return null;
+}
+
+function tripIsMine(trip) {
+  return trip.owner === ME.id;
+}
+
+function isTripActive(trip) {
+  const now = new Date();
+  return new Date(trip.startIso) <= now && new Date(trip.endIso) >= now;
+}
+
+function isTripPast(trip) {
+  return new Date(trip.endIso) < new Date();
+}
+
+function filteredTrips() {
+  const query = state.search.trim().toLowerCase();
+  let list = trips.filter(t => {
+    if (state.filter === 'mine' && !tripIsMine(t)) return false;
+    if (state.filter === 'shared' && tripIsMine(t)) return false;
+    if (state.filter === 'active' && !isTripActive(t)) return false;
+    if (state.filter === 'past' && !isTripPast(t)) return false;
+    if (!query) return true;
+    const hay = (t.title + ' ' + t.cities.join(' ')).toLowerCase();
+    return hay.includes(query);
+  });
+
+  if (state.sort === 'recent') {
+    list.sort((a, b) => new Date(b.startIso) - new Date(a.startIso));
+  } else if (state.sort === 'oldest') {
+    list.sort((a, b) => new Date(a.startIso) - new Date(b.startIso));
+  } else if (state.sort === 'duration') {
+    list.sort((a, b) => daysBetween(b.startIso, b.endIso) - daysBetween(a.startIso, a.endIso));
+  }
+  return list;
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Rendering — home
+// ─────────────────────────────────────────────────────────────────────
+
+function renderStats() {
+  const total = trips.length;
+  const totalEntries = Object.values(entries).reduce((n, list) => n + list.length, 0);
+  const cities = new Set();
+  trips.forEach(t => t.cities.forEach(c => cities.add(c)));
+  $('stats').textContent = `${total} trips · ${totalEntries} entries · ${cities.size} cities`;
+}
+
+function renderNav() {
+  $('nav').querySelectorAll('.nav-item').forEach(el => {
+    el.classList.toggle('active', el.dataset.filter === state.filter);
+  });
+}
+
+function renderSort() {
+  const labels = { recent: 'recent', oldest: 'oldest', duration: 'duration' };
+  $('sort-control').textContent = labels[state.sort];
+}
+
+function renderList() {
+  const list = filteredTrips();
+  const container = $('trip-list');
+  const empty = $('empty-state');
+
+  if (list.length === 0) {
+    container.innerHTML = '';
+    empty.style.display = 'block';
+    empty.textContent = state.search ? 'no matches.' : 'no trips yet — write one above.';
+    return;
+  }
+
+  empty.style.display = 'none';
+
+  container.innerHTML = list.map((t, i) => {
+    const stats = tripStats(t.id);
+    const role = tripRole(t);
+    const shareTag = role === 'owner'
+      ? (t.collaborators.length + t.readers.length > 0 || t.publicLink
+          ? `SHARED · +${t.collaborators.length + t.readers.length}${t.publicLink ? ' · LINK' : ''}`
+          : 'PRIVATE')
+      : role === 'collaborator' ? 'COLLABORATOR' : 'SHARED WITH ME';
+
+    const archived = isTripPast(t);
+    const active = isTripActive(t);
+
+    const dateLabel = fmtDateRange(t.startIso, t.endIso);
+    const days = daysBetween(t.startIso, t.endIso);
+
+    const routeLine = t.cities.join(' — ');
+
+    const countBits = [];
+    countBits.push(`${stats.total} entries`);
+    if (stats.photos) countBits.push(`${stats.photos} photos`);
+    if (stats.links) countBits.push(`${stats.links} links`);
+
+    return `
+      <div class="trip-item ${archived ? 'archived' : ''} animate-in" data-id="${esc(t.id)}">
+        <div class="trip-meta">
+          <span>${esc(dateLabel)} · ${days} DAYS${active ? ' · NOW' : ''}</span>
+          <span class="right">${esc(shareTag)}</span>
+        </div>
+        <div class="trip-title">${esc(t.title)}</div>
+        <div class="trip-route">${esc(routeLine)}</div>
+        <div class="trip-counts">${esc(countBits.join(' · '))}</div>
+      </div>
+    `;
+  }).join('');
+}
+
+function renderAll() {
+  renderStats();
+  renderNav();
+  renderSort();
+  renderList();
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Trip overlay
+// ─────────────────────────────────────────────────────────────────────
+
+let tripMap = null;
+let tripMapMarkers = [];
+let tripMapRoute = null;
+
+function showTrip(tripId) {
+  state.currentTripId = tripId;
+  state.timelineFilter = 'all';
+  renderTrip();
+  $('trip-overlay').classList.add('active');
+  $('trip-overlay').scrollTop = 0;
+  document.body.classList.add('no-scroll');
+}
+
+function closeTrip() {
+  $('trip-overlay').classList.remove('active');
+  state.currentTripId = null;
+  document.body.classList.remove('no-scroll');
+  renderAll();
+}
+
+function renderTrip() {
+  const trip = trips.find(t => t.id === state.currentTripId);
+  if (!trip) return;
+  const myRole = tripRole(trip);
+  const canWrite = myRole === 'owner' || myRole === 'collaborator';
+
+  const collabs = (trip.collaborators || [])
+    .concat(trip.readers || [])
+    .map(c => PEOPLE[c.userId])
+    .filter(Boolean);
+
+  const ownerName = PEOPLE[trip.owner]?.name || '—';
+  const peopleBits = [];
+  if (trip.owner === ME.id) peopleBits.push(`<span class="you">by you</span>`);
+  else peopleBits.push(`by ${esc(ownerName)}`);
+  collabs.forEach(p => {
+    const role = (trip.collaborators || []).find(c => c.userId === p.id) ? 'collab' : 'reader';
+    const label = role === 'collab' ? '+' : '◇';
+    peopleBits.push(`${label} ${esc(p.name.toLowerCase())}`);
+  });
+
+  const stats = tripStats(trip.id);
+  const dateLabel = fmtDateRange(trip.startIso, trip.endIso);
+  const days = daysBetween(trip.startIso, trip.endIso);
+  const shareLabel = trip.publicLink ? 'PUBLIC LINK' : (collabs.length ? `${collabs.length} SHARED` : 'PRIVATE');
+
+  $('trip-body').innerHTML = `
+    <span class="back-btn" data-action="trip-back">← Trips</span>
+    <div class="trip-head-dates">
+      <span>${esc(dateLabel.toUpperCase())} · ${days} DAYS${isTripActive(trip) ? ' · ACTIVE' : ''}</span>
+      <span>${esc(shareLabel)}</span>
+    </div>
+    <h2 class="trip-head-title">${esc(trip.title)}</h2>
+    <div class="trip-head-route">${esc(trip.cities.join(' — '))}</div>
+    <div class="trip-head-people">${peopleBits.join(' · ')}</div>
+
+    <div class="action-row">
+      ${canWrite ? '<button class="action-link" data-action="compose-journal">+ Journal</button>' : ''}
+      ${canWrite ? '<button class="action-link" data-action="compose-link">+ Link</button>' : ''}
+      ${canWrite ? '<button class="action-link" data-action="compose-photo">+ Photo</button>' : ''}
+      <button class="action-link muted" data-action="share-trip">Share</button>
+      ${myRole === 'owner' ? '<button class="action-link muted" data-action="edit-trip">Edit</button>' : ''}
+    </div>
+
+    <hr class="detail-rule">
+
+    <div class="section-label">Timeline · ${stats.total} entries</div>
+
+    <div class="timeline-filter-row">
+      <div class="filter-item ${state.timelineFilter === 'all' ? 'active' : ''}" data-tfilter="all">all</div>
+      <div class="filter-item ${state.timelineFilter === 'journal' ? 'active' : ''}" data-tfilter="journal">journals</div>
+      <div class="filter-item ${state.timelineFilter === 'photo' ? 'active' : ''}" data-tfilter="photo">photos</div>
+      <div class="filter-item ${state.timelineFilter === 'link' ? 'active' : ''}" data-tfilter="link">links</div>
+      <div class="filter-item ${state.timelineFilter === 'mine' ? 'active' : ''}" data-tfilter="mine">mine only</div>
+      <div class="filter-item ${state.timelineFilter === 'private' ? 'active' : ''}" data-tfilter="private">private</div>
+    </div>
+
+    <div id="timeline"></div>
+  `;
+
+  renderTimeline();
+  renderTripMap(trip);
+}
+
+function filteredTimelineEntries(trip) {
+  const all = visibleEntries(trip.id);
+  switch (state.timelineFilter) {
+    case 'journal': return all.filter(e => e.type === 'journal');
+    case 'photo': return all.filter(e => e.type === 'photo');
+    case 'link': return all.filter(e => e.type === 'link');
+    case 'mine': return all.filter(e => e.author === ME.id);
+    case 'private': return all.filter(e => e.private);
+    default: return all;
+  }
+}
+
+function renderTimeline() {
+  const trip = trips.find(t => t.id === state.currentTripId);
+  if (!trip) return;
+
+  const list = filteredTimelineEntries(trip);
+  const container = $('timeline');
+
+  if (list.length === 0) {
+    container.innerHTML = '<div class="empty-state">no entries match.</div>';
+    return;
+  }
+
+  // Group by day
+  const groups = new Map();
+  list.forEach(e => {
+    const k = dayKey(e.timestamp);
+    if (!groups.has(k)) groups.set(k, []);
+    groups.get(k).push(e);
+  });
+
+  const html = [];
+  groups.forEach((dayEntries, key) => {
+    const first = dayEntries[0];
+    const places = [...new Set(dayEntries.map(e => e.location?.name?.split(',').pop().trim()).filter(Boolean))];
+    html.push(`
+      <div class="day-group">
+        <div class="day-header">
+          <span class="day-label">${esc(fmtDayLabel(first.timestamp))}</span>
+          <span class="day-places">${esc(places.join(' · '))}</span>
+        </div>
+        ${dayEntries.map(entryHtml).join('')}
+      </div>
+    `);
+  });
+
+  container.innerHTML = html.join('');
+}
+
+function entryHtml(e) {
+  const authorName = PEOPLE[e.author]?.name || '—';
+  const isMine = e.author === ME.id;
+  const timeStr = fmtTime(e.timestamp);
+  const place = e.location?.name?.split(',')[0] || '—';
+  const typeLabel = e.type.toUpperCase();
+  const comments = (e.comments || []);
+
+  const metaHtml = `
+    <div class="entry-meta">
+      <span>
+        <span class="type">${esc(typeLabel)}</span> ·
+        ${e.private ? '<span class="private-tag">PRIVATE</span> · ' : ''}
+        ${esc(timeStr)} · ${esc(place)}
+      </span>
+      <span class="author">${isMine ? 'you' : esc(authorName.toLowerCase())}</span>
+    </div>
+  `;
+
+  let bodyHtml = '';
+
+  if (e.type === 'journal') {
+    const paragraphs = (e.body || '').split('\n').filter(p => p.trim()).map(p => `<p>${esc(p)}</p>`).join('');
+    bodyHtml = `
+      <div class="entry-body entry-journal">
+        ${e.title ? `<p><em>${esc(e.title)}</em></p>` : ''}
+        ${paragraphs}
+      </div>
+    `;
+  } else if (e.type === 'link') {
+    bodyHtml = `
+      <div class="entry-link">
+        <div class="entry-link-title">${esc(e.link.title)}</div>
+        <div class="entry-link-desc">${esc(e.link.description)}</div>
+        <div class="entry-link-domain">${esc(e.link.site)}</div>
+      </div>
+    `;
+  } else if (e.type === 'photo') {
+    bodyHtml = `
+      <div class="entry-photo"><img src="${esc(e.photoUrl)}" alt="${esc(e.caption || '')}" loading="lazy"></div>
+      ${e.caption ? `<div class="entry-photo-caption">${esc(e.caption)}</div>` : ''}
+    `;
+  }
+
+  const footerBits = [];
+  if (comments.length) footerBits.push(`${comments.length} comment${comments.length === 1 ? '' : 's'}`);
+  else footerBits.push(`reply`);
+  footerBits.push('open');
+
+  return `
+    <div class="entry ${isMine ? 'mine' : ''} ${e.private ? 'is-private' : ''}" data-entry-id="${esc(e.id)}">
+      ${metaHtml}
+      ${bodyHtml}
+      <div class="entry-footer">
+        <span class="footer-link">${esc(footerBits[0])}</span>
+        <span class="footer-link">${esc(footerBits[1])}</span>
+      </div>
+    </div>
+  `;
+}
+
+function renderTripMap(trip) {
+  // Destroy previous
+  if (tripMap) {
+    tripMap.remove();
+    tripMap = null;
+    tripMapMarkers = [];
+    tripMapRoute = null;
+  }
+
+  const allEntries = visibleEntries(trip.id).filter(e => e.location?.lat);
+  tripMap = L.map('trip-map', {
+    zoomControl: true,
+    attributionControl: true
+  });
+
+  L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
+    attribution: '© OpenStreetMap © CARTO',
+    subdomains: 'abcd',
+    maxZoom: 19
+  }).addTo(tripMap);
+
+  if (allEntries.length === 0) {
+    // Fit cities approximately — fallback to first city if known
+    tripMap.setView([45.4408, 12.3155], 6);
+    return;
+  }
+
+  const points = allEntries.map(e => [e.location.lat, e.location.lng]);
+
+  // Dashed connecting line (chronological route)
+  tripMapRoute = L.polyline(points, {
+    color: '#8B0000',
+    weight: 1.2,
+    opacity: 0.55,
+    dashArray: '3,4'
+  }).addTo(tripMap);
+
+  allEntries.forEach(e => {
+    const marker = L.circleMarker([e.location.lat, e.location.lng], {
+      radius: 6,
+      fillColor: '#8B0000',
+      color: '#FFFFF8',
+      weight: 2,
+      fillOpacity: 0.85
+    });
+    marker.bindTooltip(
+      `<div><strong>${esc(e.location.name.split(',')[0])}</strong><br><span style="color:#999;font-family:'SF Mono',monospace;font-size:10.5px;">${esc(e.type.toUpperCase())} · ${esc(fmtDate(e.timestamp))}</span></div>`,
+      { className: 'entry-tooltip', direction: 'top', offset: [0, -6] }
+    );
+    marker.on('click', () => {
+      openEntry(e.id);
+    });
+    marker.addTo(tripMap);
+    tripMapMarkers.push(marker);
+  });
+
+  const bounds = L.latLngBounds(points);
+  tripMap.fitBounds(bounds, { padding: [30, 30], maxZoom: 9 });
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Entry overlay
+// ─────────────────────────────────────────────────────────────────────
+
+function openEntry(entryId) {
+  state.currentEntryId = entryId;
+  renderEntry();
+  $('entry-overlay').classList.add('active');
+  $('entry-overlay').scrollTop = 0;
+  document.body.classList.add('no-scroll');
+}
+
+function closeEntry() {
+  $('entry-overlay').classList.remove('active');
+  state.currentEntryId = null;
+}
+
+function findEntry(id) {
+  for (const list of Object.values(entries)) {
+    const found = list.find(e => e.id === id);
+    if (found) return found;
+  }
+  return null;
+}
+
+function renderEntry() {
+  const e = findEntry(state.currentEntryId);
+  if (!e) return;
+  const isMine = e.author === ME.id;
+  const authorName = PEOPLE[e.author]?.name || '—';
+  const trip = trips.find(t => t.id === e.tripId);
+  const comments = e.comments || [];
+
+  let bodyHtml;
+  if (e.type === 'journal') {
+    const paragraphs = (e.body || '').split('\n').filter(p => p.trim()).map(p => `<p>${esc(p)}</p>`).join('');
+    bodyHtml = `
+      ${e.title ? `<h2 class="entry-detail-title">${esc(e.title)}</h2>` : ''}
+      <div class="entry-detail-content">${paragraphs}</div>
+    `;
+  } else if (e.type === 'photo') {
+    bodyHtml = `
+      <img class="entry-detail-photo" src="${esc(e.photoUrl)}" alt="${esc(e.caption || '')}" />
+      ${e.caption ? `<div class="entry-detail-content"><p><em>${esc(e.caption)}</em></p></div>` : ''}
+    `;
+  } else if (e.type === 'link') {
+    bodyHtml = `
+      <h2 class="entry-detail-title">${esc(e.link.title)}</h2>
+      <div class="entry-detail-content">
+        <p>${esc(e.link.description)}</p>
+        <p><a class="action-link" href="${esc(e.link.url)}" target="_blank" rel="noopener">open ${esc(e.link.site)} →</a></p>
+      </div>
+    `;
+  }
+
+  const commentsHtml = comments.length ? comments.map(c => {
+    const author = PEOPLE[c.author]?.name || '—';
+    const isMineC = c.author === ME.id;
+    return `
+      <div class="comment">
+        <div class="comment-meta">
+          <span class="comment-author">${isMineC ? 'you' : esc(author.toLowerCase())}</span>
+          <span>${esc(relativeTime(c.timestamp))}</span>
+        </div>
+        <div class="comment-body">${esc(c.body)}</div>
+      </div>
+    `;
+  }).join('') : '<div class="empty-state" style="padding:16px 0;">no comments yet.</div>';
+
+  $('entry-body').innerHTML = `
+    <span class="back-btn" data-action="entry-back">← ${esc(trip?.title || 'Trip')}</span>
+
+    <div class="entry-detail-meta">
+      <span>${esc(e.type.toUpperCase())}</span>
+      ${e.private ? '<span class="private-tag">PRIVATE</span>' : ''}
+      <span>${esc(fmtDate(e.timestamp))} · ${esc(fmtTime(e.timestamp))}</span>
+      <span class="author">${isMine ? 'you' : esc(authorName.toLowerCase())}</span>
+    </div>
+    <div class="entry-location">${esc(e.location?.name || '—')} · ${esc(e.location?.lat?.toFixed(4) || '')}, ${esc(e.location?.lng?.toFixed(4) || '')}</div>
+
+    ${bodyHtml}
+
+    <div class="comments-section">
+      <div class="section-label">Comments · ${comments.length}</div>
+      ${commentsHtml}
+      <div class="comment-compose">
+        <textarea class="comment-textarea" id="comment-input" placeholder="reply…"></textarea>
+        <div class="action-row">
+          <button class="action-link" data-action="post-comment">Post</button>
+          ${isMine ? '<button class="action-link muted" data-action="delete-entry">Delete</button>' : ''}
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Compose overlay
+// ─────────────────────────────────────────────────────────────────────
+
+function openCompose(type) {
+  state.composeType = type;
+  state.composePrivate = false;
+  renderCompose();
+  $('compose-overlay').classList.add('active');
+  $('compose-overlay').scrollTop = 0;
+  document.body.classList.add('no-scroll');
+}
+
+function closeCompose() {
+  $('compose-overlay').classList.remove('active');
+}
+
+function renderCompose() {
+  const trip = trips.find(t => t.id === state.currentTripId);
+  const type = state.composeType;
+
+  let typeBody = '';
+  if (type === 'journal') {
+    typeBody = `
+      <div class="field">
+        <label class="field-label">Title (optional)</label>
+        <input class="field-input" id="c-title" placeholder="a thought, a place, a moment">
+      </div>
+      <div class="field">
+        <label class="field-label">Body</label>
+        <textarea class="field-textarea" id="c-body" placeholder="write…"></textarea>
+      </div>
+    `;
+  } else if (type === 'link') {
+    typeBody = `
+      <div class="field">
+        <label class="field-label">URL</label>
+        <input class="field-input" id="c-url" placeholder="https://…">
+        <div class="field-helper">we'll fetch the title and description</div>
+      </div>
+      <div class="field">
+        <label class="field-label">Note (optional)</label>
+        <textarea class="field-textarea" id="c-note" placeholder="why this one?"></textarea>
+      </div>
+    `;
+  } else {
+    typeBody = `
+      <div class="field">
+        <label class="field-label">Photo</label>
+        <label class="photo-drop" for="c-photo">
+          tap to choose, or drop — we'll read EXIF for location & time
+        </label>
+        <input type="file" id="c-photo" accept="image/*" style="display:none;">
+      </div>
+      <div class="field">
+        <label class="field-label">Caption (optional)</label>
+        <textarea class="field-textarea" id="c-caption" placeholder="what you saw"></textarea>
+      </div>
+    `;
+  }
+
+  $('compose-body').innerHTML = `
+    <span class="back-btn" data-action="compose-back">← Back</span>
+    <h2 class="compose-title">New ${esc(type)} entry</h2>
+    <div class="trip-head-people" style="margin-bottom:20px;">in <em>${esc(trip?.title || '')}</em></div>
+
+    <div class="type-toggle">
+      <div class="type-option ${type === 'journal' ? 'active' : ''}" data-compose-type="journal">Journal</div>
+      <div class="type-option ${type === 'link' ? 'active' : ''}" data-compose-type="link">Link</div>
+      <div class="type-option ${type === 'photo' ? 'active' : ''}" data-compose-type="photo">Photo</div>
+    </div>
+
+    ${typeBody}
+
+    <div class="field">
+      <label class="field-label">Location</label>
+      <input class="field-input" id="c-location" placeholder="detect from photo, or enter…" value="${esc(trip?.cities[trip.cities.length-1] || '')}">
+      <div class="field-helper">stamped automatically for geo-tagged entries</div>
+    </div>
+
+    <div class="toggle-row">
+      <div>
+        <div class="toggle-label">Private</div>
+        <span class="toggle-sub">only you will see this entry</span>
+      </div>
+      <div class="toggle ${state.composePrivate ? 'on' : ''}" id="c-private" data-action="toggle-private"></div>
+    </div>
+
+    <div class="action-row" style="margin-top:28px;">
+      <button class="action-link" data-action="save-entry">Save</button>
+      <button class="action-link muted" data-action="compose-back">Cancel</button>
+    </div>
+  `;
+}
+
+function saveEntry() {
+  const trip = trips.find(t => t.id === state.currentTripId);
+  if (!trip) return;
+  const type = state.composeType;
+  const loc = ($('c-location')?.value || trip.cities[trip.cities.length-1] || '').trim();
+  const cityGuess = loc.split(',')[0] || 'unknown';
+  const cityCoords = guessCoords(cityGuess);
+
+  const entry = {
+    id: 'e-' + Math.random().toString(36).slice(2, 8),
+    tripId: trip.id,
+    type,
+    author: ME.id,
+    timestamp: new Date().toISOString(),
+    location: { lat: cityCoords[0], lng: cityCoords[1], name: loc },
+    private: state.composePrivate,
+    comments: []
+  };
+
+  if (type === 'journal') {
+    entry.title = ($('c-title')?.value || '').trim();
+    entry.body = ($('c-body')?.value || '').trim();
+    if (!entry.body) { toast('write something first'); return; }
+  } else if (type === 'link') {
+    const url = ($('c-url')?.value || '').trim();
+    if (!url) { toast('paste a url'); return; }
+    const site = url.replace(/^https?:\/\//, '').split('/')[0];
+    entry.link = {
+      url,
+      title: ($('c-note')?.value || '').trim() || url,
+      description: '',
+      site
+    };
+  } else {
+    entry.photoUrl = 'https://images.unsplash.com/photo-1531572753322-ad063cecc140?w=900';
+    entry.caption = ($('c-caption')?.value || '').trim();
+  }
+
+  if (!entries[trip.id]) entries[trip.id] = [];
+  entries[trip.id].push(entry);
+
+  toast('entry saved');
+  closeCompose();
+  renderTrip();
+}
+
+function guessCoords(city) {
+  const table = {
+    'venice': [45.4408, 12.3155],
+    'split': [43.5081, 16.4402],
+    'dubrovnik': [42.6502, 18.0945],
+    'kyoto': [35.0116, 135.7681],
+    'lisbon': [38.7223, -9.1393],
+    'inverness': [57.4778, -4.2247]
+  };
+  const k = city.toLowerCase().trim();
+  return table[k] || [45.4408, 12.3155];
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Share overlay
+// ─────────────────────────────────────────────────────────────────────
+
+function openShare() {
+  renderShare();
+  $('share-overlay').classList.add('active');
+  $('share-overlay').scrollTop = 0;
+  document.body.classList.add('no-scroll');
+}
+
+function closeShare() {
+  $('share-overlay').classList.remove('active');
+}
+
+function renderShare() {
+  const trip = trips.find(t => t.id === state.currentTripId);
+  if (!trip) return;
+
+  const collabs = (trip.collaborators || []).map(c => ({ ...c, person: PEOPLE[c.userId], role: 'collaborator' }));
+  const readers = (trip.readers || []).map(c => ({ ...c, person: PEOPLE[c.userId], role: 'reader' }));
+  const all = [...collabs, ...readers];
+
+  const owner = PEOPLE[trip.owner];
+
+  $('share-body').innerHTML = `
+    <span class="back-btn" data-action="share-back">← ${esc(trip.title)}</span>
+    <div class="section-label">Sharing</div>
+    <h2 class="compose-title">Who can see this?</h2>
+
+    <div class="collab-item">
+      <div class="collab-info">
+        <div class="collab-name">${esc(owner.name)} ${owner.id === ME.id ? '<span style="color:var(--ink-light);font-size:13px;font-style:italic;">— you</span>' : ''}</div>
+        <div class="collab-email">${esc(owner.email)}</div>
+      </div>
+      <span class="collab-role" style="color:var(--red);">OWNER</span>
+    </div>
+
+    ${all.map(c => `
+      <div class="collab-item">
+        <div class="collab-info">
+          <div class="collab-name">${esc(c.person.name)}</div>
+          <div class="collab-email">${esc(c.person.email)}</div>
+        </div>
+        <span class="collab-role" data-action="toggle-role" data-user="${esc(c.person.id)}">${esc(c.role.toUpperCase())}</span>
+      </div>
+    `).join('')}
+
+    <div class="field" style="margin-top:28px;">
+      <label class="field-label">Invite someone</label>
+      <input class="field-input" id="invite-email" placeholder="email address">
+      <div class="field-helper">they'll receive a link and can accept as collaborator or reader</div>
+    </div>
+
+    <div class="action-row">
+      <button class="action-link" data-action="invite-collab">Invite as collaborator</button>
+      <button class="action-link muted" data-action="invite-reader">Invite as reader</button>
+    </div>
+
+    <hr class="detail-rule">
+
+    <div class="toggle-row">
+      <div>
+        <div class="toggle-label">Public link</div>
+        <span class="toggle-sub">anyone with the link can view (read only)</span>
+      </div>
+      <div class="toggle ${trip.publicLink ? 'on' : ''}" data-action="toggle-public"></div>
+    </div>
+
+    ${trip.publicLink ? `
+      <div class="public-link-box">https://${esc(trip.publicLink)}</div>
+      <div class="action-row" style="margin-top:10px;">
+        <button class="action-link muted" data-action="copy-link">Copy link</button>
+        <button class="action-link muted" data-action="regenerate-link">Regenerate</button>
+      </div>
+    ` : ''}
+  `;
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Events
+// ─────────────────────────────────────────────────────────────────────
+
+// Main input
+const mainInput = $('main-input');
+const inputProgress = $('input-progress');
+const inputStatus = $('input-status');
+
+mainInput.addEventListener('input', () => {
+  const v = mainInput.value;
+  if (!v) {
+    state.search = '';
+    inputProgress.style.transform = 'scaleX(0)';
+    inputStatus.textContent = '';
+    renderList();
+    return;
+  }
+  if (isUrl(v)) {
+    inputProgress.style.transform = 'scaleX(1)';
+    inputStatus.textContent = 'looks like a link — paste into an open trip to save';
+    state.search = '';
+  } else {
+    inputProgress.style.transform = 'scaleX(0)';
+    inputStatus.textContent = v.length < 2 ? '' : `searching trips…`;
+    state.search = v;
+    renderList();
+  }
+});
+
+mainInput.addEventListener('keydown', e => {
+  if (e.key === 'Enter') {
+    const v = mainInput.value.trim();
+    if (!v) return;
+    if (isUrl(v)) {
+      toast('open a trip first to save a link');
+      return;
+    }
+    // Create new trip stub
+    const trip = {
+      id: 't-' + Math.random().toString(36).slice(2, 8),
+      title: v,
+      owner: ME.id,
+      startIso: new Date().toISOString().slice(0, 10),
+      endIso: new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10),
+      cities: [],
+      collaborators: [],
+      readers: [],
+      publicLink: null
+    };
+    trips.unshift(trip);
+    entries[trip.id] = [];
+    mainInput.value = '';
+    state.search = '';
+    inputStatus.textContent = '';
+    renderAll();
+    showTrip(trip.id);
+  }
+});
+
+// Nav click
+$('nav').addEventListener('click', e => {
+  const item = e.target.closest('.nav-item');
+  if (!item) return;
+  state.filter = item.dataset.filter;
+  renderAll();
+});
+
+// Sort click
+$('sort-control').addEventListener('click', () => {
+  const idx = SORT_MODES.indexOf(state.sort);
+  state.sort = SORT_MODES[(idx + 1) % SORT_MODES.length];
+  renderAll();
+});
+
+// Trip list click
+$('trip-list').addEventListener('click', e => {
+  const item = e.target.closest('.trip-item');
+  if (item) showTrip(item.dataset.id);
+});
+
+// Trip overlay click delegation
+$('trip-overlay').addEventListener('click', e => {
+  const action = e.target.closest('[data-action]');
+  if (action) {
+    const a = action.dataset.action;
+    if (a === 'trip-back') return closeTrip();
+    if (a === 'compose-journal') return openCompose('journal');
+    if (a === 'compose-link') return openCompose('link');
+    if (a === 'compose-photo') return openCompose('photo');
+    if (a === 'share-trip') return openShare();
+    if (a === 'edit-trip') return toast('edit trip (wip)');
+  }
+
+  const filt = e.target.closest('[data-tfilter]');
+  if (filt) {
+    state.timelineFilter = filt.dataset.tfilter;
+    renderTrip();
+    return;
+  }
+
+  const entry = e.target.closest('.entry');
+  if (entry && entry.dataset.entryId) {
+    openEntry(entry.dataset.entryId);
+  }
+});
+
+// Entry overlay click delegation
+$('entry-overlay').addEventListener('click', e => {
+  const action = e.target.closest('[data-action]');
+  if (!action) return;
+  const a = action.dataset.action;
+  if (a === 'entry-back') return closeEntry();
+  if (a === 'post-comment') {
+    const ta = $('comment-input');
+    const text = ta.value.trim();
+    if (!text) return;
+    const entry = findEntry(state.currentEntryId);
+    if (!entry) return;
+    entry.comments.push({
+      id: 'c-' + Math.random().toString(36).slice(2, 8),
+      author: ME.id,
+      timestamp: new Date().toISOString(),
+      body: text
+    });
+    toast('comment posted');
+    renderEntry();
+  }
+  if (a === 'delete-entry') {
+    const entry = findEntry(state.currentEntryId);
+    if (!entry) return;
+    entries[entry.tripId] = entries[entry.tripId].filter(x => x.id !== entry.id);
+    closeEntry();
+    renderTrip();
+    toast('entry deleted');
+  }
+});
+
+// Compose overlay click delegation
+$('compose-overlay').addEventListener('click', e => {
+  const action = e.target.closest('[data-action]');
+  if (action) {
+    const a = action.dataset.action;
+    if (a === 'compose-back') return closeCompose();
+    if (a === 'toggle-private') {
+      state.composePrivate = !state.composePrivate;
+      $('c-private').classList.toggle('on', state.composePrivate);
+      return;
+    }
+    if (a === 'save-entry') return saveEntry();
+  }
+
+  const typeOpt = e.target.closest('[data-compose-type]');
+  if (typeOpt) {
+    state.composeType = typeOpt.dataset.composeType;
+    renderCompose();
+  }
+});
+
+// Share overlay click delegation
+$('share-overlay').addEventListener('click', e => {
+  const action = e.target.closest('[data-action]');
+  if (!action) return;
+  const a = action.dataset.action;
+  const trip = trips.find(t => t.id === state.currentTripId);
+  if (!trip) return;
+
+  if (a === 'share-back') return closeShare();
+
+  if (a === 'toggle-public') {
+    if (trip.publicLink) {
+      trip.publicLink = null;
+      toast('public link disabled');
+    } else {
+      trip.publicLink = `passage.app/share/${slug(trip.title)}-${Math.random().toString(36).slice(2, 6)}`;
+      toast('public link enabled');
+    }
+    renderShare();
+    return;
+  }
+
+  if (a === 'regenerate-link') {
+    trip.publicLink = `passage.app/share/${slug(trip.title)}-${Math.random().toString(36).slice(2, 6)}`;
+    toast('link regenerated');
+    renderShare();
+    return;
+  }
+
+  if (a === 'copy-link') {
+    toast('link copied');
+    return;
+  }
+
+  if (a === 'invite-collab' || a === 'invite-reader') {
+    const email = $('invite-email')?.value.trim();
+    if (!email || !email.includes('@')) { toast('enter an email'); return; }
+    const person = { id: 'u-' + Math.random().toString(36).slice(2, 6), name: email.split('@')[0], email };
+    PEOPLE[person.id] = person;
+    if (a === 'invite-collab') trip.collaborators.push({ userId: person.id, role: 'collaborator' });
+    else trip.readers.push({ userId: person.id, role: 'reader' });
+    toast('invitation sent');
+    renderShare();
+    return;
+  }
+
+  if (a === 'toggle-role') {
+    const userId = action.dataset.user;
+    const asCollab = trip.collaborators.find(c => c.userId === userId);
+    if (asCollab) {
+      trip.collaborators = trip.collaborators.filter(c => c.userId !== userId);
+      trip.readers.push({ userId, role: 'reader' });
+      toast('changed to reader');
+    } else {
+      trip.readers = trip.readers.filter(r => r.userId !== userId);
+      trip.collaborators.push({ userId, role: 'collaborator' });
+      toast('changed to collaborator');
+    }
+    renderShare();
+  }
+});
+
+// Boot
+renderAll();
+</script>
+</body>
+</html>
