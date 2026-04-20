@@ -5,13 +5,15 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1, user-scalable=no, viewport-fit=cover">
   <meta name="theme-color" content="#fffff8">
   <title>passage</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
   <link rel="stylesheet" href="./styles.css">
 </head>
 <body>
-  <main id="app">
+  <main id="app" tabindex="-1">
     <header>
       <h1>passage</h1>
       <p class="stats" id="stats">loading...</p>
+      <p class="location-status" id="location-status">checking location...</p>
     </header>
 
     <div class="input-wrap">
@@ -41,23 +43,24 @@
   </main>
 
   <section class="overlay" id="trip-overlay" aria-hidden="true">
-    <div class="overlay-body" id="trip-body"></div>
+    <div class="overlay-body" id="trip-body" tabindex="-1"></div>
   </section>
 
   <section class="overlay" id="entry-overlay" aria-hidden="true">
-    <div class="overlay-body" id="entry-body"></div>
+    <div class="overlay-body" id="entry-body" tabindex="-1"></div>
   </section>
 
   <section class="overlay" id="compose-overlay" aria-hidden="true">
-    <div class="overlay-body" id="compose-body"></div>
+    <div class="overlay-body" id="compose-body" tabindex="-1"></div>
   </section>
 
   <section class="overlay" id="trip-form-overlay" aria-hidden="true">
-    <div class="overlay-body" id="trip-form-body"></div>
+    <div class="overlay-body" id="trip-form-body" tabindex="-1"></div>
   </section>
 
   <div class="toast" id="toast"></div>
 
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script type="module" src="./main.js"></script>
 </body>
 </html>

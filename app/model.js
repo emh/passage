@@ -14,7 +14,16 @@ export const ENTRY_FIELDS = [
   "title",
   "body",
   "timestamp",
-  "locationName",
+  "lat",
+  "lng",
+  "locationQuery",
+  "locationDisplayName",
+  "locationCity",
+  "locationRegion",
+  "locationCountry",
+  "locationAccuracy",
+  "geotaggedAt",
+  "geotagStatus",
   "dateCreated",
   "dateUpdated",
   "deleted"
@@ -73,7 +82,16 @@ export function normalizeEntry(input = {}) {
     title: cleanSingleLine(input.title),
     body: cleanText(input.body),
     timestamp: validDateTime(input.timestamp) || now,
-    locationName: cleanSingleLine(input.locationName),
+    lat: geoNumberOrNull(input.lat),
+    lng: geoNumberOrNull(input.lng),
+    locationQuery: cleanSingleLine(input.locationQuery),
+    locationDisplayName: cleanSingleLine(input.locationDisplayName),
+    locationCity: cleanSingleLine(input.locationCity),
+    locationRegion: cleanSingleLine(input.locationRegion),
+    locationCountry: cleanSingleLine(input.locationCountry),
+    locationAccuracy: geoNumberOrNull(input.locationAccuracy),
+    geotaggedAt: validDateTime(input.geotaggedAt),
+    geotagStatus: normalizeGeotagStatus(input.geotagStatus),
     dateCreated: typeof input.dateCreated === "string" && input.dateCreated ? input.dateCreated : now,
     dateUpdated: typeof input.dateUpdated === "string" ? input.dateUpdated : "",
     deleted: Boolean(input.deleted)
@@ -195,4 +213,15 @@ function cleanSingleLine(value) {
 
 function cleanText(value) {
   return String(value || "").replace(/\r\n/g, "\n").trim();
+}
+
+function geoNumberOrNull(value) {
+  if (value == null || String(value).trim() === "") return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function normalizeGeotagStatus(value) {
+  const status = String(value || "").trim();
+  return ["ready", "denied", "unavailable", "error", "skipped"].includes(status) ? status : "";
 }
