@@ -6,9 +6,11 @@ const RETRY_MIN_MS = 1000;
 const RETRY_MAX_MS = 15000;
 
 export class PassageSync {
-  constructor({ code, state, save, onStatus, onChange, onRoom }) {
+  constructor({ kind = "profiles", code, state, syncState, save, onStatus, onChange, onRoom }) {
+    this.kind = kind;
     this.code = normalizeCode(code);
     this.state = state;
+    this.syncStateRef = syncState;
     this.save = save;
     this.onStatus = onStatus;
     this.onChange = onChange;
@@ -83,7 +85,7 @@ export class PassageSync {
     this.setStatus("syncing");
 
     try {
-      this.socket = new WebSocket(getWebSocketUrl(this.settings.syncBaseUrl, this.code));
+      this.socket = new WebSocket(getWebSocketUrl(this.settings.syncBaseUrl, this.kind, this.code));
     } catch {
       this.setStatus("offline");
       this.scheduleReconnect();
@@ -144,7 +146,7 @@ export class PassageSync {
 
   async httpSync() {
     this.setStatus("syncing");
-    const response = await fetch(getRoomEndpoint(this.settings.syncBaseUrl, this.code, SYNC_PATH), {
+    const response = await fetch(getRoomEndpoint(this.settings.syncBaseUrl, this.kind, this.code, SYNC_PATH), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -228,7 +230,7 @@ export class PassageSync {
   }
 
   syncState() {
-    return this.state.profileSync;
+    return this.syncStateRef ? this.syncStateRef() : this.state.profileSync;
   }
 
   queue() {
@@ -252,7 +254,38 @@ export async function createRemoteProfile({ profile, mutations }, settings = loa
 }
 
 export async function fetchRemoteProfile(code, settings = loadSettings()) {
-  const response = await fetch(getRoomEndpoint(settings.syncBaseUrl, code, ""));
+  const response = await fetch(getRoomEndpoint(settings.syncBaseUrl, "profiles", code, ""));
+  if (!response.ok) throw new Error(await getErrorMessage(response));
+  return response.json();
+}
+
+export async function updateRemoteProfile(profile, settings = loadSettings()) {
+  const code = normalizeCode(profile?.code);
+  if (!code) throw new Error("Profile is not linked yet");
+
+  const response = await fetch(getRoomEndpoint(settings.syncBaseUrl, "profiles", code, "/profile"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ profile })
+  });
+
+  if (!response.ok) throw new Error(await getErrorMessage(response));
+  return response.json();
+}
+
+export async function createRemoteTrip({ trip, entries }, settings = loadSettings()) {
+  const response = await fetch(getEndpoint(settings.syncBaseUrl, "/api/trips"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ trip, entries })
+  });
+
+  if (!response.ok) throw new Error(await getErrorMessage(response));
+  return response.json();
+}
+
+export async function fetchRemoteTrip(code, settings = loadSettings()) {
+  const response = await fetch(getRoomEndpoint(settings.syncBaseUrl, "trips", code, ""));
   if (!response.ok) throw new Error(await getErrorMessage(response));
   return response.json();
 }
@@ -263,12 +296,12 @@ function getEndpoint(syncBaseUrl, path) {
   return new URL(path, `${base}/`).toString();
 }
 
-function getRoomEndpoint(syncBaseUrl, code, path) {
-  return getEndpoint(syncBaseUrl, `/api/profiles/${encodeURIComponent(normalizeCode(code))}${path}`);
+function getRoomEndpoint(syncBaseUrl, kind, code, path) {
+  return getEndpoint(syncBaseUrl, `/api/${kind}/${encodeURIComponent(normalizeCode(code))}${path}`);
 }
 
-function getWebSocketUrl(syncBaseUrl, code) {
-  const url = new URL(`/api/profiles/${encodeURIComponent(normalizeCode(code))}${SYNC_PATH}`, `${syncBaseUrl.replace(/\/+$/, "")}/`);
+function getWebSocketUrl(syncBaseUrl, kind, code) {
+  const url = new URL(`/api/${kind}/${encodeURIComponent(normalizeCode(code))}${SYNC_PATH}`, `${syncBaseUrl.replace(/\/+$/, "")}/`);
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
   return url.toString();
 }

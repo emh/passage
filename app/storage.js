@@ -9,7 +9,7 @@ import {
 } from "./model.js";
 
 export const STATE_STORAGE_KEY = "passage_v1";
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 export function createInitialState() {
   return {
@@ -21,7 +21,8 @@ export function createInitialState() {
     entries: [],
     tripClocks: {},
     entryClocks: {},
-    profileSync: createSyncState()
+    profileSync: createSyncState(),
+    sharedTripSync: {}
   };
 }
 
@@ -31,7 +32,7 @@ export function loadAppState() {
     if (!raw) return createInitialState();
 
     const data = JSON.parse(raw);
-    if (data?.schemaVersion === SCHEMA_VERSION) {
+    if (Number(data?.schemaVersion) >= 2) {
       return normalizeStoredState(data);
     }
 
@@ -54,20 +55,45 @@ export function saveAppState(state) {
 }
 
 export function normalizeStoredState(data = {}) {
+  const profile = normalizeProfile(data.profile) || createProfile();
   return {
     ...createInitialState(),
     schemaVersion: SCHEMA_VERSION,
     deviceId: typeof data.deviceId === "string" && data.deviceId.trim() ? data.deviceId.trim() : createDeviceId(),
-    profile: normalizeProfile(data.profile) || createProfile(),
+    profile,
     hlc: normalizeClock(data.hlc),
-    trips: Array.isArray(data.trips) ? data.trips.map(normalizeTrip) : [],
+    trips: Array.isArray(data.trips)
+      ? data.trips.map(trip => normalizeTrip({
+        ...trip,
+        ownerProfileId: trip?.ownerProfileId || profile.id,
+        ownerName: trip?.ownerName || profile.name || ""
+      }))
+      : [],
     entries: Array.isArray(data.entries)
-      ? data.entries.map(normalizeEntry).filter(entry => entry.tripId)
+      ? data.entries
+        .map(entry => normalizeEntry({
+          ...entry,
+          authorProfileId: entry?.authorProfileId || profile.id,
+          authorName: entry?.authorName || profile.name || ""
+        }))
+        .filter(entry => entry.tripId)
       : [],
     tripClocks: plainObject(data.tripClocks),
     entryClocks: plainObject(data.entryClocks),
-    profileSync: normalizeSyncState(data.profileSync)
+    profileSync: normalizeSyncState(data.profileSync),
+    sharedTripSync: normalizeSharedTripSync(data.sharedTripSync)
   };
+}
+
+export function ensureSharedTripSyncState(state, code, tripId = "") {
+  const normalized = String(code || "").trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
+  if (!normalized) return createSyncState({ tripId });
+  state.sharedTripSync ||= {};
+  state.sharedTripSync[normalized] = normalizeSyncState({
+    ...state.sharedTripSync[normalized],
+    tripId: tripId || state.sharedTripSync[normalized]?.tripId || ""
+  });
+  return state.sharedTripSync[normalized];
 }
 
 export function loadSettings() {
@@ -86,7 +112,8 @@ function serializeState(state) {
     entries: state.entries || [],
     tripClocks: state.tripClocks || {},
     entryClocks: state.entryClocks || {},
-    profileSync: normalizeSyncState(state.profileSync)
+    profileSync: normalizeSyncState(state.profileSync),
+    sharedTripSync: normalizeSharedTripSync(state.sharedTripSync)
   };
 }
 
@@ -98,13 +125,19 @@ function migrateLegacyState(data = {}) {
     : [];
 
   for (const trip of trips) {
-    const mutation = createMutation(state, "trip", trip.id, "_create", trip);
+    const mutation = createMutation(state, "trip", trip.id, "_create", {
+      ...trip,
+      ownerProfileId: trip.ownerProfileId || state.profile.id
+    });
     applyMutation(state, mutation);
     state.profileSync.mutationQueue.push(mutation);
   }
 
   for (const entry of entries) {
-    const mutation = createMutation(state, "entry", entry.id, "_create", entry);
+    const mutation = createMutation(state, "entry", entry.id, "_create", {
+      ...entry,
+      authorProfileId: entry.authorProfileId || state.profile.id
+    });
     applyMutation(state, mutation);
     state.profileSync.mutationQueue.push(mutation);
   }
@@ -115,12 +148,26 @@ function migrateLegacyState(data = {}) {
 function createSyncState(input = {}) {
   return {
     mutationQueue: Array.isArray(input.mutationQueue) ? input.mutationQueue.filter(isQueuedMutation) : [],
-    lastSyncTimestamp: typeof input.lastSyncTimestamp === "string" ? input.lastSyncTimestamp : ""
+    lastSyncTimestamp: typeof input.lastSyncTimestamp === "string" ? input.lastSyncTimestamp : "",
+    tripId: typeof input.tripId === "string" ? input.tripId : ""
   };
 }
 
 function normalizeSyncState(input = {}) {
   return createSyncState(input);
+}
+
+function normalizeSharedTripSync(input) {
+  const result = {};
+  if (!input || typeof input !== "object") return result;
+
+  for (const [code, syncState] of Object.entries(input)) {
+    const normalized = String(code || "").trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
+    if (!normalized) continue;
+    result[normalized] = normalizeSyncState(syncState);
+  }
+
+  return result;
 }
 
 function normalizeClock(clock) {

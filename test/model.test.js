@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { applyMutation } from "../app/model.js";
+import { applyMutation, isTripSharedByOtherProfile } from "../app/model.js";
 import { createInitialState } from "../app/storage.js";
 
 test("trip title keeps the newest mutation", () => {
@@ -76,4 +76,33 @@ test("entry create and delete mutations update the entry record", () => {
   assert.equal(state.entries[0].tripId, "trip-1");
   assert.equal(state.entries[0].geotagStatus, "ready");
   assert.equal(state.entries[0].deleted, true);
+});
+
+test("shared trip ownership identifies trips owned by another profile", () => {
+  assert.equal(isTripSharedByOtherProfile({
+    sharedCode: "ABCD1234",
+    ownerProfileId: "profile-owner",
+    ownerName: "Avery"
+  }, {
+    id: "profile-viewer",
+    name: "Evan"
+  }), true);
+
+  assert.equal(isTripSharedByOtherProfile({
+    sharedCode: "ABCD1234",
+    ownerProfileId: "profile-viewer",
+    ownerName: "Evan"
+  }, {
+    id: "profile-viewer",
+    name: "Evan"
+  }), false);
+
+  assert.equal(isTripSharedByOtherProfile({
+    sharedCode: "",
+    ownerProfileId: "profile-owner",
+    ownerName: "Avery"
+  }, {
+    id: "profile-viewer",
+    name: "Evan"
+  }), false);
 });

@@ -9,20 +9,22 @@ import {
   ENTRY_FIELDS,
   entriesForTrip,
   fromDateTimeInputValue,
+  isTripSharedByOtherProfile,
   isTripActive,
   isTripPast,
   normalizeCode,
   normalizeEntry,
   normalizeProfile,
   normalizeTrip,
+  normalizeUserName,
   TRIP_FIELDS,
   toDateTimeInputValue,
   tripEntryCounts,
   visibleEntries,
   visibleTrips
 } from "./model.js";
-import { loadAppState, loadSettings, saveAppState } from "./storage.js";
-import { createRemoteProfile, fetchRemoteProfile, PassageSync } from "./sync.js";
+import { ensureSharedTripSyncState, loadAppState, loadSettings, saveAppState } from "./storage.js";
+import { createRemoteProfile, createRemoteTrip, fetchRemoteProfile, fetchRemoteTrip, PassageSync, updateRemoteProfile } from "./sync.js";
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
@@ -55,8 +57,13 @@ const state = {
   pendingDeleteEntryId: null,
   pendingDeleteTripId: null,
   pendingLinkCode: "",
+  pendingTripCode: "",
   linkBusy: false,
   linkError: "",
+  shareTripId: null,
+  shareBusy: false,
+  shareError: "",
+  setupError: "",
   isChangingEntryLocation: false,
   entryLocationDraft: null,
   entryLocationQuery: "",
@@ -74,6 +81,7 @@ let tripMap = null;
 let entryMap = null;
 let composeMap = null;
 let profileSync = null;
+const tripSyncs = new Map();
 
 function esc(value) {
   const div = document.createElement("div");
@@ -91,13 +99,23 @@ function syncQueue() {
 
 function saveAndFlushSync() {
   save();
+  configureSync();
   profileSync?.flush();
+  for (const sync of tripSyncs.values()) sync.flush();
 }
 
 function runAction(fn) {
   Promise.resolve(fn()).catch(error => {
     toast(error instanceof Error ? error.message : String(error));
   });
+}
+
+function hasProfileName() {
+  return Boolean(state.profile?.name);
+}
+
+function sharedSyncState(code, tripId = "") {
+  return ensureSharedTripSyncState(state, code, tripId);
 }
 
 function toast(message) {
@@ -355,6 +373,16 @@ function routeLabel(trip) {
   return cities.length ? cities.join(" - ") : "no cities yet";
 }
 
+function isReadOnlyTrip(trip) {
+  return isTripSharedByOtherProfile(trip, state.profile);
+}
+
+function tripSharedByLabel(trip) {
+  if (!trip?.sharedCode || !trip?.ownerName) return "";
+  if (!isReadOnlyTrip(trip)) return "";
+  return `shared by ${trip.ownerName}`;
+}
+
 function entryRouteLabel(entry) {
   return entry.locationCity ||
     entry.locationQuery ||
@@ -397,8 +425,17 @@ function entryLocationLabel(entry) {
   return "";
 }
 
+function tripAuthors(tripId) {
+  return uniqueLabels(entriesForTrip(state.entries, tripId).map(entry => entry.authorName).filter(Boolean));
+}
+
+function showEntryAuthors(tripId) {
+  return tripAuthors(tripId).length > 1;
+}
+
 function entryMetaLine(entry, options = {}) {
   const parts = [];
+  if (options.includeAuthor && entry.authorName) parts.push(entry.authorName);
   if (options.includeDate) parts.push(formatDate(entry.timestamp.slice(0, 10)));
   parts.push(formatTime(entry.timestamp));
   const location = options.shortLocation ? entryRouteLabel(entry) : entryLocationLabel(entry);
@@ -412,11 +449,32 @@ function currentPositionLabel() {
 }
 
 function queueLocalMutation(entityType, entityId, field, value) {
+  const trip = tripForLocalMutation(entityType, entityId, value);
+  assertTripWritable(trip);
+
   const mutation = createMutation(state, entityType, entityId, field, value);
   if (applyMutation(state, mutation)) {
     syncQueue().push(mutation);
+    const code = sharedCodeForMutation(entityType, entityId, value);
+    if (code) {
+      const tripId = tripIdForMutation(entityType, entityId, value);
+      sharedSyncState(code, tripId).mutationQueue.push(mutation);
+    }
   }
   return mutation;
+}
+
+function tripForLocalMutation(entityType, entityId, value) {
+  if (entityType === "trip") {
+    return getTrip(entityId) || state.trips.find(candidate => candidate.id === String(entityId)) || normalizeTrip(value);
+  }
+
+  const tripId = tripIdForMutation(entityType, entityId, value);
+  return tripId ? getTrip(tripId) || state.trips.find(candidate => candidate.id === tripId) || null : null;
+}
+
+function assertTripWritable(trip) {
+  if (trip && isReadOnlyTrip(trip)) throw new Error("Shared trips are read only for now.");
 }
 
 function queueEntityCreate(entityType, record) {
@@ -440,6 +498,25 @@ function valuesEqual(left, right) {
     return left.every((value, index) => value === right[index]);
   }
   return left === right;
+}
+
+function sharedCodeForMutation(entityType, entityId, value) {
+  if (entityType === "trip") {
+    const trip = getTrip(entityId) || state.trips.find(candidate => candidate.id === String(entityId));
+    if (trip?.sharedCode) return trip.sharedCode;
+    const code = normalizeCode(value?.sharedCode);
+    return code || "";
+  }
+
+  const tripId = tripIdForMutation(entityType, entityId, value);
+  const trip = tripId ? getTrip(tripId) || state.trips.find(candidate => candidate.id === tripId) : null;
+  return trip?.sharedCode || "";
+}
+
+function tripIdForMutation(entityType, entityId, value) {
+  if (entityType === "trip") return String(entityId || "");
+  const entry = getEntry(entityId) || state.entries.find(candidate => candidate.id === String(entityId));
+  return entry?.tripId || String(value?.tripId || "");
 }
 
 function geotaggedEntriesForTrip(tripId) {
@@ -673,6 +750,7 @@ function renderList() {
     const active = isTripActive(trip);
     const past = isTripPast(trip);
     const days = daysBetween(trip.startIso, trip.endIso);
+    const sharedBy = tripSharedByLabel(trip);
 
     return `
       <article class="trip-item ${past ? "past" : ""}" data-trip-id="${esc(trip.id)}">
@@ -682,6 +760,7 @@ function renderList() {
         </div>
         <h2 class="trip-title">${esc(trip.title)}</h2>
         <div class="trip-route">${esc(routeLabel(trip))}</div>
+        ${sharedBy ? `<div class="trip-shared-by">${esc(sharedBy)}</div>` : ""}
       </article>
     `;
   }).join("");
@@ -694,8 +773,109 @@ function renderAll() {
   renderList();
 }
 
+function renderSetupScreen() {
+  $("setup-body").innerHTML = `
+    <h2 class="screen-title">Your name</h2>
+    <div class="trip-route" style="margin-bottom:20px;">shown when you share or write in a shared trip</div>
+
+    <label class="field">
+      <span class="field-label">Name</span>
+      <input class="field-input" id="setup-name-input" value="${esc(state.profile?.name || "")}" autocomplete="name" placeholder="your name">
+      ${state.setupError ? `<span class="field-helper accent">${esc(state.setupError)}</span>` : ""}
+    </label>
+
+    <div class="action-row">
+      <button class="action-link" data-action="save-setup-name" type="button">SAVE</button>
+    </div>
+  `;
+}
+
+function openSetupScreen() {
+  if ($("setup-overlay").classList.contains("active")) {
+    renderSetupScreen();
+    return;
+  }
+  renderSetupScreen();
+  openOverlay("setup-overlay");
+  requestAnimationFrame(() => $("setup-name-input")?.focus());
+}
+
+function closeSetupScreen() {
+  closeOverlay("setup-overlay");
+}
+
+function mergeProfile(currentProfile, incomingProfile, code = "") {
+  const current = normalizeProfile(currentProfile);
+  const incoming = normalizeProfile(incomingProfile);
+  const next = normalizeProfile({
+    id: incoming?.id || current?.id || "",
+    name: incoming?.name || current?.name || "",
+    code: code || incoming?.code || current?.code || ""
+  });
+  return next || current || incoming || null;
+}
+
+function backfillProfileIdentity() {
+  const profileId = state.profile?.id || "";
+  const profileName = state.profile?.name || "";
+  if (!profileId || !profileName) return;
+
+  for (const trip of visibleTrips(state.trips)) {
+    if (trip.ownerProfileId && trip.ownerProfileId !== profileId) continue;
+    const nextTrip = normalizeTrip({
+      ...trip,
+      ownerProfileId: profileId,
+      ownerName: profileName
+    });
+    queueEntityPatch("trip", trip, nextTrip, TRIP_FIELDS);
+  }
+
+  for (const entry of visibleEntries(state.entries)) {
+    if (entry.authorProfileId && entry.authorProfileId !== profileId) continue;
+    const nextEntry = normalizeEntry({
+      ...entry,
+      authorProfileId: profileId,
+      authorName: profileName
+    });
+    queueEntityPatch("entry", entry, nextEntry, ENTRY_FIELDS);
+  }
+}
+
+async function saveSetupName() {
+  const name = normalizeUserName($("setup-name-input")?.value || "");
+  if (!name) {
+    state.setupError = "name required";
+    renderSetupScreen();
+    requestAnimationFrame(() => $("setup-name-input")?.focus());
+    return;
+  }
+
+  state.setupError = "";
+  state.profile = normalizeProfile({
+    ...state.profile,
+    name
+  });
+  backfillProfileIdentity();
+  saveAndFlushSync();
+  closeSetupScreen();
+  renderAll();
+  handleIncomingQueries();
+
+  if (state.profile?.code) {
+    const payload = await updateRemoteProfile(state.profile, state.settings);
+    state.profile = mergeProfile(state.profile, payload?.profile || payload?.room?.profile, payload?.code || payload?.room?.code || state.profile.code);
+    save();
+    renderAll();
+  }
+}
+
 function hasLocalContent() {
-  return Boolean(visibleTrips(state.trips).length || visibleEntries(state.entries).length || syncQueue().length);
+  return Boolean(
+    visibleTrips(state.trips).length ||
+    visibleEntries(state.entries).length ||
+    syncQueue().length ||
+    Object.values(state.sharedTripSync || {}).some(syncState => syncState.mutationQueue?.length > 0)
+  );
 }
 
 function applyRemotePayload(payload, options = {}) {
@@ -706,6 +886,7 @@ function applyRemotePayload(payload, options = {}) {
     state.entryClocks = {};
     state.profileSync.mutationQueue = [];
     state.profileSync.lastSyncTimestamp = "";
+    state.sharedTripSync = {};
   }
 
   if (Array.isArray(payload?.mutations)) {
@@ -714,10 +895,7 @@ function applyRemotePayload(payload, options = {}) {
 
   const incomingProfile = normalizeProfile(payload?.profile) || normalizeProfile(payload?.room?.profile);
   if (incomingProfile) {
-    state.profile = {
-      ...incomingProfile,
-      code: payload?.code || payload?.room?.code || incomingProfile.code || ""
-    };
+    state.profile = mergeProfile(state.profile, incomingProfile, payload?.code || payload?.room?.code || incomingProfile.code || "");
   } else if (payload?.code && state.profile) {
     state.profile.code = payload.code;
   }
@@ -729,6 +907,28 @@ function applyRemotePayload(payload, options = {}) {
 
   if (payload?.highWatermark && compareHlc(payload.highWatermark, state.profileSync.lastSyncTimestamp) > 0) {
     state.profileSync.lastSyncTimestamp = payload.highWatermark;
+  }
+}
+
+function applySharedTripPayload(payload) {
+  if (Array.isArray(payload?.mutations)) {
+    applyMutations(state, payload.mutations);
+  }
+
+  const trip = payload?.trip || visibleTrips(state.trips).find(candidate => candidate.sharedCode === payload?.code);
+  const code = normalizeCode(payload?.code || trip?.sharedCode);
+  const tripId = String(trip?.id || "");
+  if (code && tripId) {
+    sharedSyncState(code, tripId).lastSyncTimestamp = payload?.highWatermark || sharedSyncState(code, tripId).lastSyncTimestamp;
+  }
+}
+
+function seedProfileQueueFromTrip(tripId) {
+  const trip = getTrip(tripId);
+  if (!trip) return;
+  syncQueue().push(createMutation(state, "trip", trip.id, "_create", trip));
+  for (const entry of entriesForTrip(state.entries, trip.id)) {
+    syncQueue().push(createMutation(state, "entry", entry.id, "_create", entry));
   }
 }
 
@@ -777,12 +977,75 @@ async function linkDevice(code, options = {}) {
   }
 }
 
+async function ensureTripShared(trip) {
+  if (!state.settings.syncBaseUrl) throw new Error("Sharing is not available here yet.");
+  if (!hasProfileName()) throw new Error("Set your name first.");
+  if (!trip) throw new Error("Trip not found.");
+  assertTripWritable(trip);
+  if (trip.sharedCode) {
+    sharedSyncState(trip.sharedCode, trip.id);
+    return trip.sharedCode;
+  }
+
+  const payload = await createRemoteTrip({
+    trip,
+    entries: entriesForTrip(state.entries, trip.id)
+  }, state.settings);
+
+  queueLocalMutation("trip", trip.id, "sharedCode", payload.code);
+  sharedSyncState(payload.code, trip.id).lastSyncTimestamp = payload.highWatermark || "";
+  saveAndFlushSync();
+  renderAll();
+  syncOpenViews();
+  return payload.code;
+}
+
+async function importSharedTrip(code) {
+  const normalized = normalizeCode(code);
+  if (!normalized) throw new Error("Share link is invalid.");
+  if (!state.settings.syncBaseUrl) throw new Error("Sharing is not available here yet.");
+  if (!hasProfileName()) {
+    state.pendingTripCode = normalized;
+    openSetupScreen();
+    return;
+  }
+
+  const existing = visibleTrips(state.trips).find(trip => trip.sharedCode === normalized);
+  const payload = await fetchRemoteTrip(normalized, state.settings);
+  applySharedTripPayload(payload);
+
+  const trip = visibleTrips(state.trips).find(candidate => candidate.sharedCode === normalized || candidate.id === payload?.trip?.id);
+  if (!trip) throw new Error("Shared trip not found.");
+
+  if (!existing) {
+    seedProfileQueueFromTrip(trip.id);
+  }
+
+  sharedSyncState(normalized, trip.id).lastSyncTimestamp = payload.highWatermark || "";
+  state.pendingTripCode = "";
+  stripTripQuery();
+  saveAndFlushSync();
+  renderAll();
+  syncOpenViews();
+  showTrip(trip.id);
+  toast(existing ? "Trip updated" : "Trip added");
+}
+
 function deviceLinkUrl() {
   if (!state.settings.syncBaseUrl || !state.profile?.code) return "";
   const url = new URL(globalThis.location.href);
   url.search = "";
   url.hash = "";
   url.searchParams.set("link", state.profile.code);
+  return url.toString();
+}
+
+function tripShareUrl(code) {
+  if (!state.settings.syncBaseUrl) return "";
+  const url = new URL(globalThis.location.href);
+  url.search = "";
+  url.hash = "";
+  url.searchParams.set("trip", normalizeCode(code));
   return url.toString();
 }
 
@@ -884,10 +1147,86 @@ function closeLinkScreen() {
   closeOverlay("link-overlay");
 }
 
+function renderShareScreen() {
+  const trip = getTrip(state.shareTripId);
+  if (!trip) return;
+  const shareUrl = trip.sharedCode ? tripShareUrl(trip.sharedCode) : "";
+  const helper = state.shareBusy
+    ? "Preparing share link..."
+    : shareUrl || (
+      state.settings.syncBaseUrl
+        ? "Open SHARE to create a trip link."
+        : "Sharing is not available here yet."
+    );
+
+  $("share-body").innerHTML = `
+    <button class="back-btn" data-action="share-back" type="button">BACK</button>
+    <h2 class="screen-title">Share trip</h2>
+    <div class="trip-route" style="margin-bottom:20px;">${esc(trip.title)}</div>
+
+    <div class="field">
+      <span class="field-label">Link</span>
+      <span class="field-helper break-anywhere">${esc(helper)}</span>
+    </div>
+
+    ${state.shareError ? `
+      <div class="field">
+        <span class="field-helper accent">${esc(state.shareError)}</span>
+      </div>
+    ` : ""}
+
+    ${shareUrl ? `
+      <div class="action-row">
+        <button class="action-link" data-action="copy-share-link" type="button">COPY</button>
+      </div>
+    ` : ""}
+  `;
+}
+
+async function openShareScreen(tripId) {
+  if (!hasProfileName()) {
+    openSetupScreen();
+    return;
+  }
+  state.shareTripId = tripId;
+  state.shareError = "";
+  renderShareScreen();
+  openOverlay("share-overlay");
+  requestAnimationFrame(() => $("share-body")?.focus());
+
+  const trip = getTrip(tripId);
+  if (!trip || trip.sharedCode || !state.settings.syncBaseUrl || state.shareBusy) return;
+
+  state.shareBusy = true;
+  renderShareScreen();
+  try {
+    await ensureTripShared(trip);
+  } catch (error) {
+    state.shareError = error instanceof Error ? error.message : "Trip could not be shared.";
+  } finally {
+    state.shareBusy = false;
+    renderShareScreen();
+  }
+}
+
+function closeShareScreen() {
+  state.shareBusy = false;
+  state.shareTripId = null;
+  state.shareError = "";
+  closeOverlay("share-overlay");
+}
+
 function stripLinkQuery() {
   const url = new URL(globalThis.location.href);
   if (!url.searchParams.has("link")) return;
   url.searchParams.delete("link");
+  globalThis.history?.replaceState?.({}, "", url);
+}
+
+function stripTripQuery() {
+  const url = new URL(globalThis.location.href);
+  if (!url.searchParams.has("trip")) return;
+  url.searchParams.delete("trip");
   globalThis.history?.replaceState?.({}, "", url);
 }
 
@@ -911,9 +1250,42 @@ function handleLinkQuery() {
   openLinkScreen();
 }
 
+function handleTripQuery() {
+  const params = new URLSearchParams(globalThis.location.search);
+  const code = normalizeCode(params.get("trip"));
+  if (!code) return;
+
+  const existing = visibleTrips(state.trips).find(trip => trip.sharedCode === code);
+  if (existing) {
+    stripTripQuery();
+    showTrip(existing.id);
+    return;
+  }
+
+  runAction(() => importSharedTrip(code));
+}
+
+function handleIncomingQueries() {
+  if (!hasProfileName()) {
+    openSetupScreen();
+    return;
+  }
+
+  handleLinkQuery();
+  handleTripQuery();
+}
+
 async function copyDeviceLink() {
   const url = deviceLinkUrl();
   if (!url) throw new Error("Link is not ready yet.");
+  await navigator.clipboard.writeText(url);
+  toast("Link copied");
+}
+
+async function copyShareLink() {
+  const trip = getTrip(state.shareTripId);
+  const url = trip?.sharedCode ? tripShareUrl(trip.sharedCode) : "";
+  if (!url) throw new Error("Share link is not ready yet.");
   await navigator.clipboard.writeText(url);
   toast("Link copied");
 }
@@ -940,6 +1312,14 @@ function renderTrip() {
   const entries = entriesForTrip(state.entries, trip.id);
   const days = daysBetween(trip.startIso, trip.endIso);
   const counts = tripEntryCounts(state.entries, trip.id);
+  const sharedBy = tripSharedByLabel(trip);
+  const readOnly = isReadOnlyTrip(trip);
+  const tripActions = readOnly
+    ? ""
+    : `
+        <button class="action-link title-action" data-action="share-trip" type="button">SHARE</button>
+        <button class="action-link title-action" data-action="edit-trip" type="button">EDIT</button>
+      `;
 
   $("trip-body").innerHTML = `
     <div class="map-panel"><div class="map-canvas" id="trip-map"></div></div>
@@ -950,13 +1330,16 @@ function renderTrip() {
     </div>
     <div class="trip-title-row">
       <h2 class="trip-head-title">${esc(trip.title)}</h2>
-      <button class="action-link title-action" data-action="edit-trip" type="button">EDIT</button>
+      ${tripActions ? `<div class="trip-head-actions">${tripActions}</div>` : ""}
     </div>
     <div class="trip-head-route">${esc(routeLabel(trip))}</div>
+    ${sharedBy ? `<div class="trip-shared-by">${esc(sharedBy)}</div>` : ""}
 
-    <div class="action-row journal-action-row">
-      <button class="action-link" data-action="compose-journal" type="button">+ JOURNAL</button>
-    </div>
+    ${readOnly ? "" : `
+      <div class="action-row journal-action-row">
+        <button class="action-link" data-action="compose-journal" type="button">+ JOURNAL</button>
+      </div>
+    `}
 
     <div id="timeline">${entries.length ? renderTimeline(entries) : '<div class="empty-state">no entries yet.</div>'}</div>
   `;
@@ -989,10 +1372,11 @@ function renderTimeline(entries) {
 
 function renderEntryItem(entry) {
   const paragraphs = bodyParagraphs(entry.body);
+  const includeAuthor = showEntryAuthors(entry.tripId);
   return `
     <article class="entry" data-entry-id="${esc(entry.id)}">
       <div class="entry-meta">
-        <span>${esc(entryMetaLine(entry, { shortLocation: true }))}</span>
+        <span>${esc(entryMetaLine(entry, { includeAuthor, shortLocation: true }))}</span>
       </div>
       <div class="entry-body">
         ${entry.title ? `<p class="entry-summary-title">${esc(entry.title)}</p>` : ""}
@@ -1032,29 +1416,36 @@ function renderEntry() {
   const entry = getEntry(state.currentEntryId);
   if (!entry) return;
   const trip = getTrip(entry.tripId);
+  const includeAuthor = showEntryAuthors(entry.tripId);
+  const readOnly = isReadOnlyTrip(trip);
+  const actions = readOnly
+    ? ""
+    : `
+      <hr class="detail-rule">
+      <div class="action-row delete-action-row">
+        <button class="action-link" data-action="edit-entry" type="button">EDIT</button>
+        <div class="delete-action-cluster">
+          <button class="action-link destructive" data-action="delete-entry" type="button">DELETE</button>
+          ${state.pendingDeleteEntryId === entry.id ? `
+            <div class="delete-confirm-row">
+              <button class="action-link destructive" data-action="confirm-delete-entry" type="button">OK</button>
+              <button class="action-link secondary" data-action="cancel-delete-entry" type="button">CANCEL</button>
+            </div>
+          ` : ""}
+        </div>
+      </div>
+    `;
 
   $("entry-body").innerHTML = `
     ${hasGeotag(entry) ? '<div class="map-panel compact"><div class="map-canvas" id="entry-map"></div></div>' : ""}
     <button class="back-btn" data-action="entry-back" type="button">BACK</button>
     <div class="entry-meta">
-      <span>${esc(entryMetaLine(entry, { includeDate: true }))}</span>
+      <span>${esc(entryMetaLine(entry, { includeAuthor, includeDate: true }))}</span>
     </div>
     ${entryLocationLabel(entry) ? `<div class="entry-location">${esc(entryLocationLabel(entry))}${entry.locationAccuracy ? ` | +/- ${esc(Math.round(entry.locationAccuracy))}m` : ""}</div>` : ""}
     ${entry.title ? `<h2 class="entry-detail-title">${esc(entry.title)}</h2>` : ""}
     <div class="entry-detail-content">${bodyParagraphs(entry.body)}</div>
-    <hr class="detail-rule">
-    <div class="action-row delete-action-row">
-      <button class="action-link" data-action="edit-entry" type="button">EDIT</button>
-      <div class="delete-action-cluster">
-        <button class="action-link destructive" data-action="delete-entry" type="button">DELETE</button>
-        ${state.pendingDeleteEntryId === entry.id ? `
-          <div class="delete-confirm-row">
-            <button class="action-link destructive" data-action="confirm-delete-entry" type="button">OK</button>
-            <button class="action-link secondary" data-action="cancel-delete-entry" type="button">CANCEL</button>
-          </div>
-        ` : ""}
-      </div>
-    </div>
+    ${actions}
   `;
 
   requestAnimationFrame(() => renderEntryMap(entry.id));
@@ -1063,6 +1454,7 @@ function renderEntry() {
 function openCompose(entryId = "") {
   const trip = getTrip(state.currentTripId);
   if (!trip) return;
+  assertTripWritable(trip);
   state.composeEntryId = entryId;
   state.isChangingEntryLocation = false;
   state.entryLocationDraft = null;
@@ -1197,6 +1589,11 @@ async function geocodeEntryLocationFromForm() {
 async function saveEntryFromForm() {
   const trip = getTrip(state.currentTripId);
   if (!trip) return;
+  assertTripWritable(trip);
+  if (!hasProfileName()) {
+    openSetupScreen();
+    return;
+  }
 
   const body = $("entry-body-input")?.value.trim() || "";
   if (!body) {
@@ -1250,6 +1647,8 @@ async function saveEntryFromForm() {
     } else {
       fields.geotagStatus = state.geolocationStatus === "denied" ? "denied" : "unavailable";
     }
+    fields.authorProfileId = state.profile?.id || "";
+    fields.authorName = state.profile?.name || "";
     const entry = createJournalEntry(trip.id, fields);
     queueEntityCreate("entry", entry);
     toast("entry saved");
@@ -1265,6 +1664,7 @@ async function saveEntryFromForm() {
 function deleteCurrentEntry() {
   const entry = getEntry(state.currentEntryId);
   if (!entry) return;
+  assertTripWritable(getTrip(entry.tripId));
 
   queueLocalMutation("entry", entry.id, "_delete", true);
 
@@ -1279,6 +1679,7 @@ function deleteCurrentEntry() {
 function openTripForm() {
   const trip = getTrip(state.currentTripId);
   if (!trip) return;
+  assertTripWritable(trip);
   state.editingTripId = trip.id;
   renderTripForm();
   openOverlay("trip-form-overlay");
@@ -1334,6 +1735,7 @@ function renderTripForm() {
 function saveTripFromForm() {
   const trip = getTrip(state.editingTripId);
   if (!trip) return;
+  assertTripWritable(trip);
 
   const title = $("trip-title-input")?.value.trim() || "";
   if (!title) {
@@ -1364,6 +1766,7 @@ function saveTripFromForm() {
 function deleteCurrentTrip() {
   const trip = getTrip(state.editingTripId);
   if (!trip) return;
+  assertTripWritable(trip);
 
   for (const entry of entriesForTrip(state.entries, trip.id)) {
     queueLocalMutation("entry", entry.id, "_delete", true);
@@ -1381,8 +1784,14 @@ function deleteCurrentTrip() {
 function createTripFromInput(value) {
   const title = value.trim();
   if (!title) return;
+  if (!hasProfileName()) {
+    openSetupScreen();
+    return;
+  }
 
   const trip = createTrip(title);
+  trip.ownerProfileId = state.profile?.id || "";
+  trip.ownerName = state.profile?.name || "";
   queueEntityCreate("trip", trip);
   saveAndFlushSync();
 
@@ -1485,6 +1894,8 @@ function syncBodyScroll() {
 }
 
 function closeTopOverlay() {
+  if ($("setup-overlay").classList.contains("active")) return;
+  if ($("share-overlay").classList.contains("active")) return closeShareScreen();
   if ($("link-overlay").classList.contains("active")) return closeLinkScreen();
   if ($("trip-form-overlay").classList.contains("active")) return closeTripForm();
   if ($("compose-overlay").classList.contains("active")) return closeCompose();
@@ -1495,6 +1906,10 @@ function closeTopOverlay() {
 function syncOpenViews() {
   if (state.currentEntryId && !getEntry(state.currentEntryId)) {
     closeEntry();
+  }
+
+  if (state.shareTripId && !getTrip(state.shareTripId)) {
+    closeShareScreen();
   }
 
   if (state.editingTripId && !getTrip(state.editingTripId)) {
@@ -1520,12 +1935,22 @@ function syncOpenViews() {
   if ($("link-overlay").classList.contains("active")) {
     renderLinkScreen();
   }
+
+  if ($("share-overlay").classList.contains("active")) {
+    renderShareScreen();
+  }
+
+  if ($("setup-overlay").classList.contains("active")) {
+    renderSetupScreen();
+  }
 }
 
 function configureSync() {
   if (!state.settings.syncBaseUrl) {
     profileSync?.stop();
     profileSync = null;
+    for (const sync of tripSyncs.values()) sync.stop();
+    tripSyncs.clear();
     state.syncStatus = "local";
     renderSyncIndicator();
     return;
@@ -1551,7 +1976,7 @@ function configureSync() {
         onRoom(room) {
           const profile = normalizeProfile(room?.profile);
           if (profile) {
-            state.profile = { ...profile, code: room.code || profile.code || "" };
+            state.profile = mergeProfile(state.profile, profile, room.code || profile.code || "");
             save();
           } else if (room?.code && state.profile) {
             state.profile.code = room.code;
@@ -1561,14 +1986,53 @@ function configureSync() {
         }
       });
       profileSync.start();
-      return;
     }
-    return;
+  } else {
+    profileSync?.stop();
+    profileSync = null;
+    state.syncStatus = "unlinked";
   }
 
-  profileSync?.stop();
-  profileSync = null;
-  state.syncStatus = "unlinked";
+  const desiredTripSyncs = new Map();
+  for (const trip of visibleTrips(state.trips)) {
+    if (!trip.sharedCode) continue;
+    desiredTripSyncs.set(trip.sharedCode, trip.id);
+    sharedSyncState(trip.sharedCode, trip.id);
+  }
+
+  for (const [code, sync] of tripSyncs.entries()) {
+    if (!desiredTripSyncs.has(code)) {
+      sync.stop();
+      tripSyncs.delete(code);
+    }
+  }
+
+  for (const [code, tripId] of desiredTripSyncs.entries()) {
+    if (tripSyncs.has(code)) continue;
+    const sync = new PassageSync({
+      kind: "trips",
+      code,
+      state,
+      syncState: () => sharedSyncState(code, tripId),
+      save,
+      onStatus() {},
+      onChange() {
+        save();
+        renderAll();
+        syncOpenViews();
+      },
+      onRoom(room) {
+        const trip = getTrip(room?.tripId || tripId);
+        if (trip && room?.code && trip.sharedCode !== room.code) {
+          trip.sharedCode = room.code;
+          save();
+        }
+      }
+    });
+    tripSyncs.set(code, sync);
+    sync.start();
+  }
+
   renderSyncIndicator();
 }
 
@@ -1612,8 +2076,9 @@ function bindEvents() {
     const action = event.target.closest("[data-action]");
     if (action) {
       if (action.dataset.action === "trip-back") return closeTrip();
-      if (action.dataset.action === "compose-journal") return openCompose();
-      if (action.dataset.action === "edit-trip") return openTripForm();
+      if (action.dataset.action === "compose-journal") return runAction(() => openCompose());
+      if (action.dataset.action === "share-trip") return runAction(() => openShareScreen(state.currentTripId));
+      if (action.dataset.action === "edit-trip") return runAction(() => openTripForm());
     }
 
     const entry = event.target.closest(".entry");
@@ -1628,9 +2093,11 @@ function bindEvents() {
       const entry = getEntry(state.currentEntryId);
       if (!entry) return;
       state.currentTripId = entry.tripId;
-      return openCompose(entry.id);
+      return runAction(() => openCompose(entry.id));
     }
     if (action.dataset.action === "delete-entry") {
+      const entry = getEntry(state.currentEntryId);
+      if (entry && isReadOnlyTrip(getTrip(entry.tripId))) return toast("Shared trips are read only for now.");
       state.pendingDeleteEntryId = state.currentEntryId;
       return renderEntry();
     }
@@ -1638,7 +2105,7 @@ function bindEvents() {
       state.pendingDeleteEntryId = null;
       return renderEntry();
     }
-    if (action.dataset.action === "confirm-delete-entry") return deleteCurrentEntry();
+    if (action.dataset.action === "confirm-delete-entry") return runAction(deleteCurrentEntry);
   });
 
   $("compose-overlay").addEventListener("click", event => {
@@ -1687,8 +2154,10 @@ function bindEvents() {
     const action = event.target.closest("[data-action]");
     if (!action) return;
     if (action.dataset.action === "trip-form-back") return closeTripForm();
-    if (action.dataset.action === "save-trip") return saveTripFromForm();
+    if (action.dataset.action === "save-trip") return runAction(saveTripFromForm);
     if (action.dataset.action === "delete-trip") {
+      const trip = getTrip(state.editingTripId);
+      if (isReadOnlyTrip(trip)) return toast("Shared trips are read only for now.");
       state.pendingDeleteTripId = state.editingTripId;
       return renderTripForm();
     }
@@ -1696,7 +2165,7 @@ function bindEvents() {
       state.pendingDeleteTripId = null;
       return renderTripForm();
     }
-    if (action.dataset.action === "confirm-delete-trip") return deleteCurrentTrip();
+    if (action.dataset.action === "confirm-delete-trip") return runAction(deleteCurrentTrip);
   });
 
   $("link-overlay").addEventListener("click", event => {
@@ -1714,6 +2183,25 @@ function bindEvents() {
     }
   });
 
+  $("share-overlay").addEventListener("click", event => {
+    const action = event.target.closest("[data-action]");
+    if (!action) return;
+    if (action.dataset.action === "share-back") return closeShareScreen();
+    if (action.dataset.action === "copy-share-link") return runAction(copyShareLink);
+  });
+
+  $("setup-overlay").addEventListener("click", event => {
+    const action = event.target.closest("[data-action]");
+    if (!action) return;
+    if (action.dataset.action === "save-setup-name") return runAction(saveSetupName);
+  });
+
+  $("setup-overlay").addEventListener("keydown", event => {
+    if (event.key !== "Enter" || event.target?.id !== "setup-name-input") return;
+    event.preventDefault();
+    runAction(saveSetupName);
+  });
+
   document.addEventListener("keydown", event => {
     if (event.key === "Escape") closeTopOverlay();
   });
@@ -1726,7 +2214,7 @@ function init() {
   bindEvents();
   renderAll();
   configureSync();
-  handleLinkQuery();
+  handleIncomingQueries();
   initGeolocation();
 }
 

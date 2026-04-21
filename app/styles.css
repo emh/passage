@@ -157,6 +157,7 @@ h1 {
 .location-status,
 .input-status,
 .trip-meta,
+.trip-shared-by,
 .section-label,
 .entry-meta,
 .entry-location,
@@ -172,6 +173,7 @@ h1 {
 .stats,
 .location-status,
 .input-status,
+.trip-shared-by,
 .section-label,
 .entry-meta,
 .entry-location,
@@ -280,6 +282,10 @@ h1 {
   color: var(--ink-mid);
   font-size: 15px;
   line-height: 1.45;
+}
+
+.trip-shared-by {
+  margin-bottom: 6px;
 }
 
 .map-panel {
@@ -401,8 +407,13 @@ h1 {
 
 #compose-overlay,
 #trip-form-overlay,
-#link-overlay {
+#link-overlay,
+#share-overlay {
   z-index: 180;
+}
+
+#setup-overlay {
+  z-index: 220;
 }
 
 .overlay-body {
@@ -458,6 +469,13 @@ h1 {
   min-width: 0;
 }
 
+.trip-head-actions {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 18px;
+  flex: 0 0 auto;
+}
+
 .title-action {
   flex: 0 0 auto;
 }
@@ -476,6 +494,11 @@ h1 {
   margin-bottom: 20px;
   color: var(--ink-mid);
   font-size: 16px;
+}
+
+.trip-head-route + .trip-shared-by {
+  margin-top: -12px;
+  margin-bottom: 20px;
 }
 
 .action-row {

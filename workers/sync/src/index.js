@@ -65,6 +65,10 @@ export class PassageProfileRoom {
         return json(await this.materializedPayload(await this.requireRoom()), 200, cors);
       }
 
+      if (route.action === "profile" && request.method === "POST") {
+        return this.updateProfile(request, cors);
+      }
+
       return json({ error: "Not found" }, 404, cors);
     } catch (error) {
       return json({ error: messageFromError(error) }, error?.status || 400, cors);
@@ -80,12 +84,22 @@ export class PassageProfileRoom {
     if (existing) return json({ error: "Invite code already exists" }, 409, cors);
 
     const body = await request.json();
-    const room = normalizeProfileRoom({ code: route.code, profile: body.profile });
-    await this.saveRoom(room);
 
-    const accepted = await this.acceptMutations(Array.isArray(body.mutations) ? body.mutations : [], room);
+    if (route.kind === "profiles") {
+      const room = normalizeProfileRoom({ code: route.code, profile: body.profile });
+      await this.saveRoom(room);
+      const accepted = await this.acceptMutations(Array.isArray(body.mutations) ? body.mutations : [], room);
+      const payload = await this.materializedPayload(room);
+      return json({ ...payload, confirmedIds: accepted.map(mutation => mutation.id) }, 200, cors);
+    }
+
+    const room = normalizeTripRoom({ code: route.code, trip: body.trip });
+    await this.saveRoom(room);
+    const seed = createTripSeedMutations(body.trip, body.entries, room);
+    await this.insertMutations(seed);
     const payload = await this.materializedPayload(room);
-    return json({ ...payload, confirmedIds: accepted.map(mutation => mutation.id) }, 200, cors);
+    this.broadcast(null, { type: "mutations", items: seed, highWatermark: await this.highWatermark() });
+    return json({ ...payload, confirmedIds: seed.map(mutation => mutation.id) }, 200, cors);
   }
 
   async handleWebSocket(request) {
@@ -107,8 +121,9 @@ export class PassageProfileRoom {
     const accepted = await this.acceptMutations(Array.isArray(body.mutations) ? body.mutations : [], room);
     return json({
       room,
-      profile: room.profile,
       code: room.code,
+      profile: room.profile || null,
+      trip: room.type === "trip" ? materializeMutations(await this.listSince(""), room).trips[0] || null : null,
       mutations: await this.listSince(typeof body.since === "string" ? body.since : ""),
       confirmedIds: accepted.map(mutation => mutation.id),
       highWatermark: await this.highWatermark()
@@ -195,6 +210,21 @@ export class PassageProfileRoom {
     return accepted;
   }
 
+  async insertMutations(mutations) {
+    for (const mutation of mutations) {
+      const exists = [...this.state.storage.sql.exec("SELECT id FROM mutations WHERE id = ?", mutation.id)];
+      if (exists.length) continue;
+
+      this.state.storage.sql.exec(
+        "INSERT INTO mutations (id, timestamp, json, created_at) VALUES (?, ?, ?, ?)",
+        mutation.id,
+        mutation.timestamp,
+        JSON.stringify(mutation),
+        Date.now()
+      );
+    }
+  }
+
   async listSince(since) {
     const query = since
       ? this.state.storage.sql.exec("SELECT json FROM mutations WHERE timestamp > ? ORDER BY timestamp ASC, id ASC", since)
@@ -210,15 +240,24 @@ export class PassageProfileRoom {
   async materializedPayload(room) {
     const mutations = await this.listSince("");
     const state = materializeMutations(mutations, room);
-    return {
-      room,
-      code: room.code,
-      profile: room.profile,
-      mutations,
-      trips: state.trips,
-      entries: state.entries,
-      highWatermark: await this.highWatermark()
-    };
+    return room.type === "profile"
+      ? {
+        room,
+        code: room.code,
+        profile: room.profile,
+        mutations,
+        trips: state.trips,
+        entries: state.entries,
+        highWatermark: await this.highWatermark()
+      }
+      : {
+        room,
+        code: room.code,
+        trip: state.trips[0] || null,
+        entries: state.entries,
+        mutations,
+        highWatermark: await this.highWatermark()
+      };
   }
 
   async getRoom() {
@@ -227,12 +266,34 @@ export class PassageProfileRoom {
 
   async requireRoom() {
     const room = await this.getRoom();
-    if (!room) throw statusError("Profile not found", 404);
+    if (!room) throw statusError("Room not found", 404);
     return room;
   }
 
   async saveRoom(room) {
     await this.state.storage.put("room", room);
+  }
+
+  async updateProfile(request, cors) {
+    const room = await this.requireRoom();
+    if (room.type !== "profile") return json({ error: "Not found" }, 404, cors);
+
+    const body = await request.json();
+    const nextRoom = normalizeProfileRoom({
+      ...room,
+      profile: {
+        ...room.profile,
+        ...(body?.profile || {})
+      }
+    });
+
+    await this.saveRoom(nextRoom);
+    this.broadcast(null, { type: "room", room: nextRoom });
+    return json({
+      room: nextRoom,
+      code: nextRoom.code,
+      profile: nextRoom.profile
+    }, 200, cors);
   }
 }
 
@@ -246,27 +307,31 @@ export default {
     const url = new URL(request.url);
 
     if (request.method === "POST" && url.pathname === "/api/profiles") {
-      return createRoomWithFreshCode(request, env, cors);
+      return createRoomWithFreshCode(request, env, cors, "profiles");
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/trips") {
+      return createRoomWithFreshCode(request, env, cors, "trips");
     }
 
     const route = parseRoomRoute(url.pathname);
     if (!route) return json({ error: "Not found" }, 404, cors);
 
-    const id = env.PASSAGE_PROFILE_ROOM.idFromName(`profiles:${route.code}`);
+    const id = env.PASSAGE_PROFILE_ROOM.idFromName(`${route.kind}:${route.code}`);
     const room = env.PASSAGE_PROFILE_ROOM.get(id);
     return room.fetch(request);
   }
 };
 
-async function createRoomWithFreshCode(request, env, cors) {
+async function createRoomWithFreshCode(request, env, cors, kind) {
   const body = await request.text();
 
   for (let attempt = 0; attempt < 12; attempt += 1) {
     const code = generateInviteCode();
-    const id = env.PASSAGE_PROFILE_ROOM.idFromName(`profiles:${code}`);
+    const id = env.PASSAGE_PROFILE_ROOM.idFromName(`${kind}:${code}`);
     const room = env.PASSAGE_PROFILE_ROOM.get(id);
     const url = new URL(request.url);
-    url.pathname = `/api/profiles/${code}`;
+    url.pathname = `/api/${kind}/${code}`;
 
     const response = await room.fetch(new Request(url, {
       method: "POST",
@@ -281,16 +346,16 @@ async function createRoomWithFreshCode(request, env, cors) {
     if (response.status !== 409) return response;
   }
 
-  return json({ error: "Could not create link code" }, 500, cors);
+  return json({ error: "Could not create invite code" }, 500, cors);
 }
 
 export function parseRoomRoute(pathname) {
-  const match = /^\/api\/profiles\/([A-Za-z0-9]+)(?:\/(sync|state))?\/?$/.exec(pathname);
+  const match = /^\/api\/(profiles|trips)\/([A-Za-z0-9]+)(?:\/(sync|state|profile))?\/?$/.exec(pathname);
   if (!match) return null;
   return {
-    kind: "profiles",
-    code: normalizeCode(match[1]),
-    action: match[2] || ""
+    kind: match[1],
+    code: normalizeCode(match[2]),
+    action: match[3] || ""
   };
 }
 
@@ -313,6 +378,22 @@ export function normalizeProfileRoom(input = {}) {
   };
 }
 
+export function normalizeTripRoom(input = {}) {
+  const code = normalizeCode(input.code);
+  const trip = normalizeTrip({ ...input.trip, sharedCode: code });
+  if (!code) throw new Error("Code is required");
+  if (!trip.id) throw new Error("Trip id is required");
+  return {
+    type: "trip",
+    code,
+    tripId: trip.id,
+    tripTitle: trip.title,
+    ownerProfileId: trip.ownerProfileId,
+    ownerName: trip.ownerName,
+    createdAt: typeof input.createdAt === "string" ? input.createdAt : new Date().toISOString()
+  };
+}
+
 export function validateMutation(input, room) {
   if (!input || typeof input !== "object") throw new Error("Mutation must be an object");
 
@@ -329,24 +410,26 @@ export function validateMutation(input, room) {
 
   if (!["trip", "entry"].includes(mutation.entityType)) throw new Error("Invalid entity type");
   if (!isHlc(mutation.timestamp)) throw new Error("Invalid timestamp");
-  if (room?.profile?.id && mutation.profileId && mutation.profileId !== room.profile.id) {
+
+  if (room.type === "profile" && room.profile?.id && mutation.profileId && mutation.profileId !== room.profile.id) {
     throw new Error("Invalid profile");
   }
 
-  if (mutation.entityType === "trip") return validateTripMutation(mutation);
-  return validateEntryMutation(mutation);
+  if (mutation.entityType === "trip") return validateTripMutation(mutation, room);
+  return validateEntryMutation(mutation, room);
 }
 
 export function materializeMutations(mutations, room) {
   const state = {
     deviceId: "server",
-    profile: room?.profile || null,
+    profile: room.type === "profile" ? room.profile : null,
     hlc: { wallTime: 0, counter: 0 },
     trips: [],
     entries: [],
     tripClocks: {},
     entryClocks: {},
-    profileSync: { mutationQueue: [], lastSyncTimestamp: "" }
+    profileSync: { mutationQueue: [], lastSyncTimestamp: "" },
+    sharedTripSync: {}
   };
 
   for (const mutation of mutations
@@ -361,27 +444,68 @@ export function materializeMutations(mutations, room) {
   };
 }
 
-function validateTripMutation(mutation) {
+function validateTripMutation(mutation, room) {
   if (mutation.field === "_create") {
     const trip = normalizeTrip({ ...mutation.value, id: mutation.entityId });
+    if (room.type === "trip" && trip.id !== room.tripId) throw new Error("Invalid trip");
     return { ...mutation, value: trip };
   }
 
   const field = mutation.field === "_delete" ? "deleted" : mutation.field;
   if (!TRIP_FIELDS.includes(field)) throw new Error("Invalid trip field");
+  if (room.type === "trip" && mutation.entityId !== room.tripId) throw new Error("Invalid trip");
   return mutation;
 }
 
-function validateEntryMutation(mutation) {
+function validateEntryMutation(mutation, room) {
   if (mutation.field === "_create") {
     const entry = normalizeEntry({ ...mutation.value, id: mutation.entityId });
     if (!entry.tripId) throw new Error("Entry tripId is required");
+    if (room.type === "trip" && entry.tripId !== room.tripId) throw new Error("Invalid entry");
     return { ...mutation, value: entry };
   }
 
   const field = mutation.field === "_delete" ? "deleted" : mutation.field;
   if (!ENTRY_FIELDS.includes(field)) throw new Error("Invalid entry field");
   return mutation;
+}
+
+function createTripSeedMutations(rawTrip, rawEntries, room) {
+  const trip = normalizeTrip({ ...rawTrip, id: room.tripId, sharedCode: room.code });
+  const entries = Array.isArray(rawEntries)
+    ? rawEntries
+      .map(entry => normalizeEntry({ ...entry, tripId: room.tripId }))
+      .filter(entry => entry.tripId === room.tripId)
+      .sort((left, right) => new Date(left.timestamp) - new Date(right.timestamp))
+    : [];
+
+  const wallTime = Date.now();
+  const mutations = [
+    serverMutation("trip", trip.id, "_create", trip, wallTime, 0, trip.ownerProfileId)
+  ];
+
+  for (let index = 0; index < entries.length; index += 1) {
+    mutations.push(serverMutation("entry", entries[index].id, "_create", entries[index], wallTime, index + 1, entries[index].authorProfileId));
+  }
+
+  return mutations;
+}
+
+function serverMutation(entityType, entityId, field, value, wallTime, counter, profileId = "") {
+  return {
+    id: `server-${crypto.randomUUID()}`,
+    entityType,
+    entityId: String(entityId || ""),
+    field,
+    value,
+    timestamp: serializeServerHlc(wallTime, counter),
+    deviceId: "server",
+    profileId: String(profileId || "").trim()
+  };
+}
+
+function serializeServerHlc(wallTime, counter) {
+  return `${String(Math.max(0, Number(wallTime) || 0)).padStart(13, "0")}:${String(Math.max(0, Number(counter) || 0)).padStart(4, "0")}:server`;
 }
 
 function compareMutation(left, right) {

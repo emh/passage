@@ -3,6 +3,9 @@ export const TRIP_FIELDS = [
   "startIso",
   "endIso",
   "cities",
+  "sharedCode",
+  "ownerProfileId",
+  "ownerName",
   "dateCreated",
   "dateUpdated",
   "deleted"
@@ -24,6 +27,8 @@ export const ENTRY_FIELDS = [
   "locationAccuracy",
   "geotaggedAt",
   "geotagStatus",
+  "authorProfileId",
+  "authorName",
   "dateCreated",
   "dateUpdated",
   "deleted"
@@ -41,6 +46,7 @@ export function createDeviceId() {
 export function createProfile(input = {}) {
   return normalizeProfile({
     id: input.id || createId("profile"),
+    name: input.name || "",
     code: input.code || ""
   });
 }
@@ -50,12 +56,17 @@ export function normalizeProfile(input = {}) {
   if (!id) return null;
   return {
     id,
+    name: normalizeUserName(input.name),
     code: normalizeCode(input.code)
   };
 }
 
 export function normalizeCode(value) {
   return String(value || "").trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
+}
+
+export function normalizeUserName(value) {
+  return cleanSingleLine(value);
 }
 
 export function serializeHlc(wallTime, counter, deviceId) {
@@ -144,6 +155,9 @@ export function normalizeTrip(input = {}) {
     startIso,
     endIso: normalizedEnd,
     cities: normalizeCities(input.cities),
+    sharedCode: normalizeCode(input.sharedCode),
+    ownerProfileId: String(input.ownerProfileId || "").trim(),
+    ownerName: normalizeUserName(input.ownerName),
     dateCreated: typeof input.dateCreated === "string" && input.dateCreated ? input.dateCreated : now,
     dateUpdated: typeof input.dateUpdated === "string" ? input.dateUpdated : "",
     deleted: Boolean(input.deleted)
@@ -180,6 +194,8 @@ export function normalizeEntry(input = {}) {
     locationAccuracy: geoNumberOrNull(input.locationAccuracy),
     geotaggedAt: validDateTime(input.geotaggedAt),
     geotagStatus: normalizeGeotagStatus(input.geotagStatus),
+    authorProfileId: String(input.authorProfileId || "").trim(),
+    authorName: normalizeUserName(input.authorName),
     dateCreated: typeof input.dateCreated === "string" && input.dateCreated ? input.dateCreated : now,
     dateUpdated: typeof input.dateUpdated === "string" ? input.dateUpdated : "",
     deleted: Boolean(input.deleted)
@@ -217,6 +233,18 @@ export function tripEntryCounts(entries, tripId) {
     total: count,
     journals: count
   };
+}
+
+export function isTripSharedByOtherProfile(trip, profile) {
+  if (!normalizeCode(trip?.sharedCode)) return false;
+
+  const ownerProfileId = String(trip?.ownerProfileId || "").trim();
+  const profileId = String(profile?.id || "").trim();
+  if (ownerProfileId && profileId) return ownerProfileId !== profileId;
+
+  const ownerName = normalizeUserName(trip?.ownerName);
+  const profileName = normalizeUserName(profile?.name);
+  return Boolean(ownerName && profileName && ownerName !== profileName);
 }
 
 export function applyMutations(state, mutations = []) {
@@ -414,6 +442,9 @@ function coerceTripField(field, value) {
   if (field === "deleted") return Boolean(value);
   if (field === "cities") return normalizeCities(value);
   if (field === "startIso" || field === "endIso") return validDateOnly(value) || todayIso();
+  if (field === "sharedCode") return normalizeCode(value);
+  if (field === "ownerProfileId") return String(value || "").trim();
+  if (field === "ownerName") return normalizeUserName(value);
   if (field === "title") return cleanSingleLine(value) || "Untitled trip";
   if (field === "dateCreated") return validDateTime(value) || new Date().toISOString();
   if (field === "dateUpdated") return validDateTime(value);
@@ -429,6 +460,8 @@ function coerceEntryField(field, value) {
   if (field === "body") return cleanText(value);
   if (field === "tripId") return String(value || "");
   if (field === "geotagStatus") return normalizeGeotagStatus(value);
+  if (field === "authorProfileId") return String(value || "").trim();
+  if (field === "authorName") return normalizeUserName(value);
   return cleanSingleLine(value);
 }
 
