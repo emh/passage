@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { applyMutation, isTripSharedByOtherProfile } from "../app/model.js";
+import { applyMutation, isTripSharedByOtherProfile, normalizeEntry } from "../app/model.js";
 import { createInitialState } from "../app/storage.js";
 
 test("trip title keeps the newest mutation", () => {
@@ -76,6 +76,27 @@ test("entry create and delete mutations update the entry record", () => {
   assert.equal(state.entries[0].tripId, "trip-1");
   assert.equal(state.entries[0].geotagStatus, "ready");
   assert.equal(state.entries[0].deleted, true);
+});
+
+test("entries keep legacy body text as description and normalize photo metadata", () => {
+  const entry = normalizeEntry({
+    id: "entry-1",
+    tripId: "trip-1",
+    body: "First morning in town.",
+    url: "example.com/path",
+    photoAssetId: "photo-1",
+    photoMime: "image/jpeg",
+    photoWidth: 1600,
+    photoHeight: 900,
+    photoSize: 123456
+  });
+
+  assert.equal(entry.type, "entry");
+  assert.equal(entry.description, "First morning in town.");
+  assert.equal(entry.body, "First morning in town.");
+  assert.equal(entry.url, "https://example.com/path");
+  assert.equal(entry.photoAssetId, "photo-1");
+  assert.equal(entry.photoWidth, 1600);
 });
 
 test("shared trip ownership identifies trips owned by another profile", () => {

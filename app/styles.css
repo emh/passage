@@ -496,11 +496,6 @@ h1 {
   font-size: 16px;
 }
 
-.trip-head-route + .trip-shared-by {
-  margin-top: -12px;
-  margin-bottom: 20px;
-}
-
 .action-row {
   display: flex;
   flex-wrap: wrap;
@@ -511,12 +506,6 @@ h1 {
 
 .delete-action-row {
   align-items: flex-start;
-}
-
-.journal-action-row {
-  margin: 14px 0 0;
-  padding: 3px 0;
-  border-top: 1px solid var(--rule);
 }
 
 .action-link {
@@ -648,6 +637,54 @@ h1 {
   font-style: italic;
 }
 
+.entry-photo {
+  display: block;
+  width: 100%;
+  height: auto;
+  margin-bottom: 12px;
+  border-radius: 0;
+  background: var(--hover);
+}
+
+.entry-photo.summary {
+  object-fit: contain;
+}
+
+.entry-photo.detail {
+  margin-bottom: 22px;
+}
+
+.entry-photo-placeholder {
+  display: flex;
+  width: 100%;
+  min-height: 160px;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 12px;
+  border: 1px solid var(--rule);
+  color: var(--ink-light);
+  font-family: var(--mono);
+  font-size: 10.5px;
+}
+
+.entry-photo-placeholder.form {
+  min-height: 140px;
+}
+
+.entry-link {
+  display: inline-block;
+  color: var(--link);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0;
+  text-decoration: none;
+  text-transform: uppercase;
+}
+
+.entry-link:hover {
+  color: var(--link-light);
+}
+
 .entry-location {
   margin-bottom: 20px;
 }
@@ -674,6 +711,22 @@ h1 {
   font-size: 17px;
   line-height: 1.55;
   resize: vertical;
+}
+
+.file-input {
+  border-bottom: 0;
+  color: var(--ink-light);
+  font-family: var(--mono);
+  font-size: 10.5px;
+}
+
+.photo-preview {
+  display: block;
+  width: 100%;
+  height: auto;
+  margin-bottom: 12px;
+  object-fit: contain;
+  background: var(--hover);
 }
 
 .field-helper {

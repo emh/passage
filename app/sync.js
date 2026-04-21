@@ -290,6 +290,24 @@ export async function fetchRemoteTrip(code, settings = loadSettings()) {
   return response.json();
 }
 
+export async function uploadPhotoAsset(assetId, blob, settings = loadSettings()) {
+  if (!(blob instanceof Blob)) throw new Error("Photo is not available locally");
+  const response = await fetch(getAssetEndpoint(settings.syncBaseUrl, assetId), {
+    method: "PUT",
+    headers: { "Content-Type": blob.type || "image/jpeg" },
+    body: blob
+  });
+
+  if (!response.ok) throw new Error(await getErrorMessage(response));
+  return response.json();
+}
+
+export async function fetchPhotoAsset(assetId, settings = loadSettings()) {
+  const response = await fetch(getAssetEndpoint(settings.syncBaseUrl, assetId));
+  if (!response.ok) throw new Error(await getErrorMessage(response));
+  return response.blob();
+}
+
 function getEndpoint(syncBaseUrl, path) {
   if (!syncBaseUrl) throw new Error("Sync worker is not configured");
   const base = syncBaseUrl.replace(/\/+$/, "");
@@ -298,6 +316,12 @@ function getEndpoint(syncBaseUrl, path) {
 
 function getRoomEndpoint(syncBaseUrl, kind, code, path) {
   return getEndpoint(syncBaseUrl, `/api/${kind}/${encodeURIComponent(normalizeCode(code))}${path}`);
+}
+
+function getAssetEndpoint(syncBaseUrl, assetId) {
+  const id = String(assetId || "").trim();
+  if (!id) throw new Error("Photo id is required");
+  return getEndpoint(syncBaseUrl, `/api/assets/${encodeURIComponent(id)}`);
 }
 
 function getWebSocketUrl(syncBaseUrl, kind, code) {

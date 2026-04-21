@@ -9,3 +9,7 @@ class_name = "PassageProfileRoom"
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["PassageProfileRoom"]
+
+[[r2_buckets]]
+binding = "PASSAGE_PHOTOS"
+bucket_name = "passage-photos"

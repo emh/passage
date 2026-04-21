@@ -15,7 +15,15 @@ export const ENTRY_FIELDS = [
   "tripId",
   "type",
   "title",
+  "description",
   "body",
+  "url",
+  "photoAssetId",
+  "photoMime",
+  "photoWidth",
+  "photoHeight",
+  "photoSize",
+  "photoUploadedAt",
   "timestamp",
   "lat",
   "lng",
@@ -177,12 +185,21 @@ export function createTrip(title) {
 
 export function normalizeEntry(input = {}) {
   const now = new Date().toISOString();
+  const description = cleanText(input.description) || cleanText(input.body);
   return {
     id: String(input.id || createId("entry")),
     tripId: String(input.tripId || ""),
-    type: "journal",
+    type: "entry",
     title: cleanSingleLine(input.title),
-    body: cleanText(input.body),
+    description,
+    body: description,
+    url: normalizeEntryUrl(input.url),
+    photoAssetId: cleanSingleLine(input.photoAssetId),
+    photoMime: normalizePhotoMime(input.photoMime),
+    photoWidth: positiveIntegerOrNull(input.photoWidth),
+    photoHeight: positiveIntegerOrNull(input.photoHeight),
+    photoSize: positiveIntegerOrNull(input.photoSize),
+    photoUploadedAt: validDateTime(input.photoUploadedAt),
     timestamp: validDateTime(input.timestamp) || now,
     lat: geoNumberOrNull(input.lat),
     lng: geoNumberOrNull(input.lng),
@@ -211,6 +228,10 @@ export function createJournalEntry(tripId, fields = {}) {
     timestamp: fields.timestamp || new Date().toISOString(),
     dateCreated: new Date().toISOString()
   });
+}
+
+export function createEntry(tripId, fields = {}) {
+  return createJournalEntry(tripId, fields);
 }
 
 export function visibleTrips(trips = []) {
@@ -393,7 +414,12 @@ function applyEntryMutation(state, mutation) {
   }
 
   if (!shouldApply(clocks[field], mutation.timestamp)) return false;
-  entry[field] = coerceEntryField(field, mutation.value);
+  const value = coerceEntryField(field, mutation.value);
+  entry[field] = value;
+  if (field === "description" || field === "body") {
+    entry.description = value;
+    entry.body = value;
+  }
   clocks[field] = mutation.timestamp;
   return true;
 }
@@ -433,9 +459,27 @@ function geoNumberOrNull(value) {
   return Number.isFinite(number) ? number : null;
 }
 
+function positiveIntegerOrNull(value) {
+  if (value == null || String(value).trim() === "") return null;
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? Math.round(number) : null;
+}
+
 function normalizeGeotagStatus(value) {
   const status = String(value || "").trim();
   return ["ready", "denied", "unavailable", "error", "skipped"].includes(status) ? status : "";
+}
+
+function normalizeEntryUrl(value) {
+  const text = cleanSingleLine(value);
+  if (!text) return "";
+  if (/^[a-z][a-z0-9+.-]*:/i.test(text)) return text;
+  return `https://${text}`;
+}
+
+function normalizePhotoMime(value) {
+  const text = cleanSingleLine(value).toLowerCase();
+  return text.startsWith("image/") ? text : "";
 }
 
 function coerceTripField(field, value) {
@@ -455,9 +499,13 @@ function coerceEntryField(field, value) {
   if (field === "deleted") return Boolean(value);
   if (field === "lat" || field === "lng" || field === "locationAccuracy") return geoNumberOrNull(value);
   if (field === "timestamp" || field === "dateCreated") return validDateTime(value) || new Date().toISOString();
-  if (field === "geotaggedAt" || field === "dateUpdated") return validDateTime(value);
-  if (field === "type") return "journal";
-  if (field === "body") return cleanText(value);
+  if (field === "geotaggedAt" || field === "dateUpdated" || field === "photoUploadedAt") return validDateTime(value);
+  if (field === "type") return "entry";
+  if (field === "body" || field === "description") return cleanText(value);
+  if (field === "url") return normalizeEntryUrl(value);
+  if (field === "photoMime") return normalizePhotoMime(value);
+  if (field === "photoWidth" || field === "photoHeight" || field === "photoSize") return positiveIntegerOrNull(value);
+  if (field === "photoAssetId") return cleanSingleLine(value);
   if (field === "tripId") return String(value || "");
   if (field === "geotagStatus") return normalizeGeotagStatus(value);
   if (field === "authorProfileId") return String(value || "").trim();

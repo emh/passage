@@ -5,6 +5,7 @@ import {
   materializeMutations,
   normalizeProfileRoom,
   normalizeTripRoom,
+  parseAssetRoute,
   parseRoomRoute,
   validateMutation
 } from "../workers/sync/src/index.js";
@@ -15,6 +16,11 @@ test("room routes extract profile code and action", () => {
   assert.deepEqual(parseRoomRoute("/api/profiles/CD34/profile"), { kind: "profiles", code: "CD34", action: "profile" });
   assert.deepEqual(parseRoomRoute("/api/trips/TRIP12/state"), { kind: "trips", code: "TRIP12", action: "state" });
   assert.equal(parseRoomRoute("/api/lists/AB12"), null);
+});
+
+test("asset routes extract photo asset ids", () => {
+  assert.deepEqual(parseAssetRoute("/api/assets/photo-123_ABC.jpg"), { assetId: "photo-123_ABC.jpg" });
+  assert.equal(parseAssetRoute("/api/profiles/AB12"), null);
 });
 
 test("profile rooms normalize hidden profile metadata", () => {

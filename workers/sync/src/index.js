@@ -12,6 +12,7 @@ import {
 const CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 const CODE_LENGTH = 8;
 const INTERNAL_CREATE_HEADER = "X-Passage-Internal-Create";
+const MAX_PHOTO_BYTES = 4 * 1024 * 1024;
 
 export class PassageProfileRoom {
   constructor(state, env) {
@@ -314,6 +315,9 @@ export default {
       return createRoomWithFreshCode(request, env, cors, "trips");
     }
 
+    const assetRoute = parseAssetRoute(url.pathname);
+    if (assetRoute) return handleAssetRequest(request, env, cors, assetRoute);
+
     const route = parseRoomRoute(url.pathname);
     if (!route) return json({ error: "Not found" }, 404, cors);
 
@@ -357,6 +361,56 @@ export function parseRoomRoute(pathname) {
     code: normalizeCode(match[2]),
     action: match[3] || ""
   };
+}
+
+export function parseAssetRoute(pathname) {
+  const match = /^\/api\/assets\/([A-Za-z0-9._-]+)\/?$/.exec(pathname);
+  if (!match) return null;
+  return { assetId: match[1] };
+}
+
+async function handleAssetRequest(request, env, cors, route) {
+  if (!env.PASSAGE_PHOTOS) {
+    return json({ error: "Photo storage is not configured" }, 503, cors);
+  }
+
+  const key = photoAssetKey(route.assetId);
+  if (request.method === "GET") {
+    const object = await env.PASSAGE_PHOTOS.get(key);
+    if (!object) return json({ error: "Photo not found" }, 404, cors);
+
+    const headers = new Headers(cors);
+    object.writeHttpMetadata(headers);
+    headers.set("Cache-Control", "public, max-age=31536000, immutable");
+    headers.set("ETag", object.httpEtag);
+    return new Response(object.body, { status: 200, headers });
+  }
+
+  if (request.method === "PUT" || request.method === "POST") {
+    const contentType = request.headers.get("Content-Type") || "application/octet-stream";
+    if (!contentType.startsWith("image/")) return json({ error: "Expected an image" }, 415, cors);
+
+    const bytes = await request.arrayBuffer();
+    if (bytes.byteLength > MAX_PHOTO_BYTES) return json({ error: "Photo is too large" }, 413, cors);
+
+    const uploadedAt = new Date().toISOString();
+    await env.PASSAGE_PHOTOS.put(key, bytes, {
+      httpMetadata: { contentType },
+      customMetadata: { assetId: route.assetId, uploadedAt }
+    });
+
+    return json({
+      assetId: route.assetId,
+      size: bytes.byteLength,
+      uploadedAt
+    }, 200, cors);
+  }
+
+  return json({ error: "Not found" }, 404, cors);
+}
+
+function photoAssetKey(assetId) {
+  return `photos/${String(assetId || "").trim()}`;
 }
 
 export function generateInviteCode(length = CODE_LENGTH) {
@@ -524,7 +578,7 @@ function corsHeaders(request) {
   const origin = request.headers.get("Origin") || "*";
   return {
     "Access-Control-Allow-Origin": origin === "null" ? "*" : origin,
-    "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+    "Access-Control-Allow-Methods": "GET,POST,PUT,OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type",
     "Vary": "Origin"
   };

@@ -3,7 +3,7 @@ import {
   applyMutation,
   compareHlc,
   createMutation,
-  createJournalEntry,
+  createEntry,
   createTrip,
   daysBetween,
   ENTRY_FIELDS,
@@ -24,7 +24,8 @@ import {
   visibleTrips
 } from "./model.js";
 import { ensureSharedTripSyncState, loadAppState, loadSettings, saveAppState } from "./storage.js";
-import { createRemoteProfile, createRemoteTrip, fetchRemoteProfile, fetchRemoteTrip, PassageSync, updateRemoteProfile } from "./sync.js";
+import { ensurePhotoObjectUrl, getCachedPhotoUrl, getPhotoAsset, hasPhotoAsset, processPhotoFile, putPhotoAsset } from "./photos.js";
+import { createRemoteProfile, createRemoteTrip, fetchPhotoAsset, fetchRemoteProfile, fetchRemoteTrip, PassageSync, updateRemoteProfile, uploadPhotoAsset } from "./sync.js";
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
@@ -69,6 +70,9 @@ const state = {
   entryLocationQuery: "",
   entryLocationError: "",
   entryFormDraft: null,
+  entryPhotoDraft: null,
+  entryPhotoRemoved: false,
+  entryPhotoError: "",
   geolocationStatus: "checking",
   geolocationMessage: "checking location...",
   lastPosition: null
@@ -82,6 +86,9 @@ let entryMap = null;
 let composeMap = null;
 let profileSync = null;
 const tripSyncs = new Map();
+const photoUploads = new Set();
+const photoDownloads = new Set();
+let photoWorkScheduled = false;
 
 function esc(value) {
   const div = document.createElement("div");
@@ -295,6 +302,37 @@ async function geocodeAddress(query) {
   };
 }
 
+async function reverseGeocodeCoordinates(lat, lng) {
+  const url = new URL("https://nominatim.openstreetmap.org/reverse");
+  url.searchParams.set("format", "jsonv2");
+  url.searchParams.set("addressdetails", "1");
+  url.searchParams.set("lat", String(lat));
+  url.searchParams.set("lon", String(lng));
+
+  const response = await fetch(url, {
+    headers: {
+      "Accept": "application/json"
+    }
+  });
+
+  if (!response.ok) throw new Error(`geocoder returned ${response.status}`);
+
+  const result = await response.json();
+  const address = result.address || {};
+  return {
+    lat,
+    lng,
+    locationQuery: cityFromAddress(address) || String(result.name || "photo location").trim(),
+    locationDisplayName: String(result.display_name || "").trim(),
+    locationCity: cityFromAddress(address),
+    locationRegion: String(address.state || address.region || address.province || "").trim(),
+    locationCountry: String(address.country || "").trim(),
+    locationAccuracy: null,
+    geotaggedAt: new Date().toISOString(),
+    geotagStatus: "ready"
+  };
+}
+
 function cityFromAddress(address = {}) {
   return String(
     address.city ||
@@ -443,6 +481,53 @@ function entryMetaLine(entry, options = {}) {
   return parts.filter(Boolean).join(" | ");
 }
 
+function entryDescription(entry) {
+  return entry?.description || entry?.body || "";
+}
+
+function entryHasPhoto(entry) {
+  return Boolean(entry?.photoAssetId);
+}
+
+function entryUrlLabel(url) {
+  try {
+    const parsed = new URL(url);
+    return parsed.hostname.replace(/^www\./, "") || url;
+  } catch {
+    return url;
+  }
+}
+
+function validEntryUrl(value) {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  try {
+    return new URL(/^[a-z][a-z0-9+.-]*:/i.test(text) ? text : `https://${text}`).toString();
+  } catch {
+    return "";
+  }
+}
+
+function entryHasRequiredContent({ title = "", description = "", url = "", hasPhoto = false } = {}) {
+  return Boolean(
+    String(title || "").trim() ||
+    String(description || "").trim() ||
+    validEntryUrl(url) ||
+    hasPhoto
+  );
+}
+
+function photoFieldsFromDraft(draft) {
+  return {
+    photoAssetId: draft?.photoAssetId || "",
+    photoMime: draft?.photoMime || "",
+    photoWidth: draft?.photoWidth || null,
+    photoHeight: draft?.photoHeight || null,
+    photoSize: draft?.photoSize || null,
+    photoUploadedAt: draft?.photoUploadedAt || ""
+  };
+}
+
 function currentPositionLabel() {
   if (state.lastPosition) return `${state.lastPosition.lat.toFixed(5)}, ${state.lastPosition.lng.toFixed(5)}`;
   return state.geolocationMessage || "location status unknown";
@@ -517,6 +602,65 @@ function tripIdForMutation(entityType, entityId, value) {
   if (entityType === "trip") return String(entityId || "");
   const entry = getEntry(entityId) || state.entries.find(candidate => candidate.id === String(entityId));
   return entry?.tripId || String(value?.tripId || "");
+}
+
+function schedulePhotoWork() {
+  if (photoWorkScheduled) return;
+  photoWorkScheduled = true;
+  setTimeout(() => {
+    photoWorkScheduled = false;
+    refreshPhotoAssets().catch(() => {});
+  }, 0);
+}
+
+async function refreshPhotoAssets() {
+  const entries = visibleEntries(state.entries).filter(entryHasPhoto);
+  await Promise.all(entries.map(async entry => {
+    await ensureEntryPhotoCached(entry);
+    await uploadPendingPhotoForEntry(entry);
+  }));
+}
+
+async function ensureEntryPhotoCached(entry) {
+  const assetId = entry?.photoAssetId || "";
+  if (!assetId || getCachedPhotoUrl(assetId) || photoDownloads.has(assetId)) return;
+
+  photoDownloads.add(assetId);
+  try {
+    if (!(await hasPhotoAsset(assetId))) {
+      if (!entry.photoUploadedAt || !state.settings.syncBaseUrl) return;
+      const blob = await fetchPhotoAsset(assetId, state.settings);
+      await putPhotoAsset(assetId, blob);
+    }
+
+    await ensurePhotoObjectUrl(assetId);
+    renderAll();
+    syncOpenViews();
+  } finally {
+    photoDownloads.delete(assetId);
+  }
+}
+
+async function uploadPendingPhotoForEntry(entry) {
+  const assetId = entry?.photoAssetId || "";
+  if (!assetId || entry.photoUploadedAt || !state.settings.syncBaseUrl || photoUploads.has(assetId)) return;
+
+  photoUploads.add(assetId);
+  try {
+    const asset = await getPhotoAsset(assetId);
+    if (!asset?.blob) return;
+
+    const payload = await uploadPhotoAsset(assetId, asset.blob, state.settings);
+    const current = getEntry(entry.id);
+    if (current?.photoAssetId === assetId && !current.photoUploadedAt) {
+      queueLocalMutation("entry", current.id, "photoUploadedAt", payload.uploadedAt || new Date().toISOString());
+      saveAndFlushSync();
+      renderAll();
+      syncOpenViews();
+    }
+  } finally {
+    photoUploads.delete(assetId);
+  }
 }
 
 function geotaggedEntriesForTrip(tripId) {
@@ -662,7 +806,7 @@ function renderEntryMap(entryId) {
   entryMap = renderSinglePointMap({
     container,
     point: [entry.lat, entry.lng],
-    label: entry.title || "journal entry",
+    label: entry.title || "entry",
     accuracy: entry.locationAccuracy,
     zoom: 15
   });
@@ -771,6 +915,7 @@ function renderAll() {
   renderSyncIndicator();
   renderStats();
   renderList();
+  schedulePhotoWork();
 }
 
 function renderSetupScreen() {
@@ -1317,6 +1462,7 @@ function renderTrip() {
   const tripActions = readOnly
     ? ""
     : `
+        <button class="action-link title-action" data-action="compose-journal" type="button">+ ENTRY</button>
         <button class="action-link title-action" data-action="share-trip" type="button">SHARE</button>
         <button class="action-link title-action" data-action="edit-trip" type="button">EDIT</button>
       `;
@@ -1332,14 +1478,7 @@ function renderTrip() {
       <h2 class="trip-head-title">${esc(trip.title)}</h2>
       ${tripActions ? `<div class="trip-head-actions">${tripActions}</div>` : ""}
     </div>
-    <div class="trip-head-route">${esc(routeLabel(trip))}</div>
     ${sharedBy ? `<div class="trip-shared-by">${esc(sharedBy)}</div>` : ""}
-
-    ${readOnly ? "" : `
-      <div class="action-row journal-action-row">
-        <button class="action-link" data-action="compose-journal" type="button">+ JOURNAL</button>
-      </div>
-    `}
 
     <div id="timeline">${entries.length ? renderTimeline(entries) : '<div class="empty-state">no entries yet.</div>'}</div>
   `;
@@ -1371,8 +1510,9 @@ function renderTimeline(entries) {
 }
 
 function renderEntryItem(entry) {
-  const paragraphs = bodyParagraphs(entry.body);
+  const paragraphs = bodyParagraphs(entryDescription(entry));
   const includeAuthor = showEntryAuthors(entry.tripId);
+  const url = entry.url || "";
   return `
     <article class="entry" data-entry-id="${esc(entry.id)}">
       <div class="entry-meta">
@@ -1380,10 +1520,25 @@ function renderEntryItem(entry) {
       </div>
       <div class="entry-body">
         ${entry.title ? `<p class="entry-summary-title">${esc(entry.title)}</p>` : ""}
+        ${renderEntryPhoto(entry, "summary")}
         ${paragraphs}
+        ${url ? `<a class="entry-link" href="${esc(url)}" target="_blank" rel="noreferrer">${esc(entryUrlLabel(url))}</a>` : ""}
       </div>
     </article>
   `;
+}
+
+function renderEntryPhoto(entry, variant = "summary") {
+  if (!entryHasPhoto(entry)) return "";
+
+  const url = getCachedPhotoUrl(entry.photoAssetId);
+  if (url) {
+    return `<img class="entry-photo ${esc(variant)}" src="${esc(url)}" alt="${esc(entry.title || "entry photo")}" loading="lazy">`;
+  }
+
+  ensureEntryPhotoCached(entry).catch(() => {});
+  const label = entry.photoUploadedAt ? "loading photo..." : "photo pending upload";
+  return `<div class="entry-photo-placeholder ${esc(variant)}">${esc(label)}</div>`;
 }
 
 function bodyParagraphs(value) {
@@ -1394,7 +1549,7 @@ function bodyParagraphs(value) {
 
   return paragraphs.length
     ? paragraphs.map(part => `<p>${esc(part)}</p>`).join("")
-    : "<p></p>";
+    : "";
 }
 
 function openEntry(entryId) {
@@ -1444,7 +1599,11 @@ function renderEntry() {
     </div>
     ${entryLocationLabel(entry) ? `<div class="entry-location">${esc(entryLocationLabel(entry))}${entry.locationAccuracy ? ` | +/- ${esc(Math.round(entry.locationAccuracy))}m` : ""}</div>` : ""}
     ${entry.title ? `<h2 class="entry-detail-title">${esc(entry.title)}</h2>` : ""}
-    <div class="entry-detail-content">${bodyParagraphs(entry.body)}</div>
+    ${renderEntryPhoto(entry, "detail")}
+    <div class="entry-detail-content">
+      ${bodyParagraphs(entryDescription(entry))}
+      ${entry.url ? `<a class="entry-link" href="${esc(entry.url)}" target="_blank" rel="noreferrer">${esc(entryUrlLabel(entry.url))}</a>` : ""}
+    </div>
     ${actions}
   `;
 
@@ -1461,9 +1620,12 @@ function openCompose(entryId = "") {
   state.entryLocationQuery = "";
   state.entryLocationError = "";
   state.entryFormDraft = null;
+  state.entryPhotoDraft = null;
+  state.entryPhotoRemoved = false;
+  state.entryPhotoError = "";
   renderCompose();
   openOverlay("compose-overlay");
-  requestAnimationFrame(() => $("entry-body-input")?.focus());
+  requestAnimationFrame(() => $("entry-description-input")?.focus());
 }
 
 function closeCompose() {
@@ -1475,17 +1637,22 @@ function closeCompose() {
   state.entryLocationQuery = "";
   state.entryLocationError = "";
   state.entryFormDraft = null;
+  state.entryPhotoDraft = null;
+  state.entryPhotoRemoved = false;
+  state.entryPhotoError = "";
 }
 
 function captureEntryFormDraft() {
   const titleInput = $("entry-title-input");
-  const bodyInput = $("entry-body-input");
+  const descriptionInput = $("entry-description-input");
+  const urlInput = $("entry-url-input");
   const timeInput = $("entry-time-input");
-  if (!titleInput && !bodyInput && !timeInput) return;
+  if (!titleInput && !descriptionInput && !urlInput && !timeInput) return;
 
   state.entryFormDraft = {
     title: titleInput?.value || "",
-    body: bodyInput?.value || "",
+    description: descriptionInput?.value || "",
+    url: urlInput?.value || "",
     timestampInput: timeInput?.value || ""
   };
 }
@@ -1525,10 +1692,38 @@ function renderLocationField(entry, label) {
   `;
 }
 
+function renderPhotoField(entry) {
+  const draft = state.entryPhotoDraft;
+  const existing = !state.entryPhotoRemoved && entryHasPhoto(entry) ? entry : null;
+  const photo = draft || existing;
+  const url = photo?.photoAssetId ? getCachedPhotoUrl(photo.photoAssetId) : "";
+  const helper = state.entryPhotoError || (
+    photo?.photoAssetId
+      ? `${photo.photoWidth || "?"} x ${photo.photoHeight || "?"}`
+      : "optional"
+  );
+
+  if (photo?.photoAssetId) {
+    ensureEntryPhotoCached(photo).catch(() => {});
+  }
+
+  return `
+    <div class="field photo-field">
+      <div class="field-label-row">
+        <span class="field-label">Photo</span>
+        ${photo?.photoAssetId ? '<button class="inline-link" data-action="remove-entry-photo" type="button">REMOVE</button>' : ""}
+      </div>
+      ${url ? `<img class="photo-preview" src="${esc(url)}" alt="selected photo">` : photo?.photoAssetId ? `<div class="entry-photo-placeholder form">loading photo...</div>` : ""}
+      <input class="field-input file-input" id="entry-photo-input" type="file" accept="image/*">
+      <span class="field-helper ${state.entryPhotoError ? "accent" : ""}">${esc(helper)}</span>
+    </div>
+  `;
+}
+
 function renderCompose() {
   const trip = getTrip(state.currentTripId);
   const entry = state.composeEntryId ? getEntry(state.composeEntryId) : null;
-  const title = entry ? "Edit journal entry" : "New journal entry";
+  const title = entry ? "Edit entry" : "New entry";
   const locationLabel = entry
     ? entryLocationLabel(entry)
     : currentPositionLabel();
@@ -1545,9 +1740,16 @@ function renderCompose() {
     </label>
 
     <label class="field">
-      <span class="field-label">Body</span>
-      <textarea class="field-textarea" id="entry-body-input" placeholder="write...">${esc(entryFormValue(entry, "body", entry?.body || ""))}</textarea>
+      <span class="field-label">Description</span>
+      <textarea class="field-textarea" id="entry-description-input" placeholder="write...">${esc(entryFormValue(entry, "description", entryDescription(entry)))}</textarea>
     </label>
+
+    <label class="field">
+      <span class="field-label">URL</span>
+      <input class="field-input" id="entry-url-input" value="${esc(entryFormValue(entry, "url", entry?.url || ""))}" placeholder="https://example.com" autocomplete="url">
+    </label>
+
+    ${renderPhotoField(entry)}
 
     <label class="field">
       <span class="field-label">When</span>
@@ -1586,6 +1788,47 @@ async function geocodeEntryLocationFromForm() {
   }
 }
 
+async function selectEntryPhoto(file) {
+  captureEntryFormDraft();
+  state.entryPhotoError = "processing photo...";
+  renderCompose();
+
+  const processed = await processPhotoFile(file);
+  state.entryPhotoDraft = processed.metadata;
+  state.entryPhotoRemoved = false;
+  state.entryPhotoError = "";
+
+  if (processed.exif?.capturedAt && !state.composeEntryId) {
+    state.entryFormDraft ||= {};
+    state.entryFormDraft.timestampInput = toDateTimeInputValue(processed.exif.capturedAt);
+  }
+
+  if (Number.isFinite(processed.exif?.lat) && Number.isFinite(processed.exif?.lng)) {
+    const lat = processed.exif.lat;
+    const lng = processed.exif.lng;
+    try {
+      state.entryLocationDraft = await reverseGeocodeCoordinates(lat, lng);
+    } catch {
+      state.entryLocationDraft = {
+        lat,
+        lng,
+        locationQuery: "photo location",
+        locationDisplayName: `${lat.toFixed(5)}, ${lng.toFixed(5)}`,
+        locationCity: "",
+        locationRegion: "",
+        locationCountry: "",
+        locationAccuracy: null,
+        geotaggedAt: new Date().toISOString(),
+        geotagStatus: "ready"
+      };
+    }
+    state.entryLocationQuery = state.entryLocationDraft.locationQuery;
+  }
+
+  renderCompose();
+  toast("photo added");
+}
+
 async function saveEntryFromForm() {
   const trip = getTrip(state.currentTripId);
   if (!trip) return;
@@ -1595,18 +1838,35 @@ async function saveEntryFromForm() {
     return;
   }
 
-  const body = $("entry-body-input")?.value.trim() || "";
-  if (!body) {
-    toast("write something first");
+  const currentEntry = state.composeEntryId
+    ? state.entries.find(entry => entry.id === state.composeEntryId) || null
+    : null;
+  const title = $("entry-title-input")?.value || "";
+  const description = $("entry-description-input")?.value.trim() || "";
+  const url = $("entry-url-input")?.value || "";
+  const hasPhoto = state.entryPhotoRemoved
+    ? false
+    : Boolean(state.entryPhotoDraft?.photoAssetId || currentEntry?.photoAssetId);
+
+  if (!entryHasRequiredContent({ title, description, url, hasPhoto })) {
+    toast("add a title, description, URL, or photo");
     return;
   }
 
   const fields = {
-    title: $("entry-title-input")?.value || "",
-    body,
+    title,
+    description,
+    body: description,
+    url,
     timestamp: fromDateTimeInputValue($("entry-time-input")?.value || ""),
     dateUpdated: new Date().toISOString()
   };
+
+  if (state.entryPhotoRemoved) {
+    Object.assign(fields, photoFieldsFromDraft(null));
+  } else if (state.entryPhotoDraft) {
+    Object.assign(fields, photoFieldsFromDraft(state.entryPhotoDraft));
+  }
 
   if (state.entryLocationDraft) {
     Object.assign(fields, {
@@ -1626,12 +1886,11 @@ async function saveEntryFromForm() {
   if (state.composeEntryId) {
     const index = state.entries.findIndex(entry => entry.id === state.composeEntryId);
     if (index < 0) return;
-    const currentEntry = state.entries[index];
     const nextEntry = normalizeEntry({
       ...state.entries[index],
       ...fields
     });
-    queueEntityPatch("entry", currentEntry, nextEntry, ENTRY_FIELDS);
+    queueEntityPatch("entry", state.entries[index], nextEntry, ENTRY_FIELDS);
     toast("entry updated");
   } else {
     const position = state.entryLocationDraft ? null : await positionForNewEntry();
@@ -1649,7 +1908,7 @@ async function saveEntryFromForm() {
     }
     fields.authorProfileId = state.profile?.id || "";
     fields.authorName = state.profile?.name || "";
-    const entry = createJournalEntry(trip.id, fields);
+    const entry = createEntry(trip.id, fields);
     queueEntityCreate("entry", entry);
     toast("entry saved");
   }
@@ -1659,6 +1918,7 @@ async function saveEntryFromForm() {
   if (state.currentEntryId) renderEntry();
   if (state.currentTripId) renderTrip();
   renderAll();
+  schedulePhotoWork();
 }
 
 function deleteCurrentEntry() {
@@ -1928,6 +2188,10 @@ function syncOpenViews() {
     renderEntry();
   }
 
+  if ($("compose-overlay").classList.contains("active") && state.currentTripId) {
+    renderCompose();
+  }
+
   if ($("trip-form-overlay").classList.contains("active") && state.editingTripId) {
     renderTripForm();
   }
@@ -2082,7 +2346,7 @@ function bindEvents() {
     }
 
     const entry = event.target.closest(".entry");
-    if (entry) openEntry(entry.dataset.entryId);
+    if (entry && !event.target.closest("a")) openEntry(entry.dataset.entryId);
   });
 
   $("entry-overlay").addEventListener("click", event => {
@@ -2127,6 +2391,14 @@ function bindEvents() {
       renderCompose();
       return;
     }
+    if (action.dataset.action === "remove-entry-photo") {
+      captureEntryFormDraft();
+      state.entryPhotoDraft = null;
+      state.entryPhotoRemoved = true;
+      state.entryPhotoError = "";
+      renderCompose();
+      return;
+    }
     if (action.dataset.action === "geocode-entry-location") {
       geocodeEntryLocationFromForm().catch(error => {
         state.entryLocationError = error instanceof Error ? error.message : "location not found";
@@ -2139,6 +2411,13 @@ function bindEvents() {
         toast(error instanceof Error ? error.message : "entry could not be saved");
       });
     }
+  });
+
+  $("compose-overlay").addEventListener("change", event => {
+    if (event.target?.id !== "entry-photo-input") return;
+    const file = event.target.files?.[0];
+    if (!file) return;
+    runAction(() => selectEntryPhoto(file));
   });
 
   $("compose-overlay").addEventListener("keydown", event => {
