@@ -55,8 +55,6 @@ const state = {
   currentEntryId: null,
   composeEntryId: null,
   editingTripId: null,
-  pendingDeleteEntryId: null,
-  pendingDeleteTripId: null,
   pendingLinkCode: "",
   pendingTripCode: "",
   linkBusy: false,
@@ -73,8 +71,9 @@ const state = {
   entryPhotoDraft: null,
   entryPhotoRemoved: false,
   entryPhotoError: "",
+  entryPhotoNote: "",
   composeInitialSnapshot: null,
-  composeDiscardConfirm: false,
+  confirmation: null,
   geolocationStatus: "checking",
   geolocationMessage: "checking location...",
   lastPosition: null
@@ -90,6 +89,8 @@ let profileSync = null;
 const tripSyncs = new Map();
 const photoUploads = new Set();
 const photoDownloads = new Set();
+const photoTransferStatus = new Map();
+const photoRetryTimers = new Map();
 let photoWorkScheduled = false;
 
 function esc(value) {
@@ -530,6 +531,89 @@ function photoFieldsFromDraft(draft) {
   };
 }
 
+function renderConfirmation() {
+  const root = $("confirm-root");
+  if (!root) return;
+
+  const confirmation = state.confirmation;
+  if (!confirmation) {
+    root.innerHTML = "";
+    return;
+  }
+
+  root.innerHTML = `
+    <div class="confirm-toast" role="status" aria-live="polite">
+      <span>${esc(confirmation.message)}</span>
+      <button class="action-link destructive" data-action="confirm-toast-yes" type="button">YES</button>
+      <button class="action-link secondary" data-action="confirm-toast-no" id="confirm-toast-no" type="button">NO</button>
+    </div>
+  `;
+}
+
+function openConfirmation(view, message, action, contextId = "") {
+  state.confirmation = {
+    view,
+    message,
+    action,
+    contextId: String(contextId || "")
+  };
+  renderConfirmation();
+}
+
+function clearConfirmation(view = "") {
+  if (!view || state.confirmation?.view === view) {
+    state.confirmation = null;
+    renderConfirmation();
+  }
+}
+
+function photoStatus(entry) {
+  const assetId = entry?.photoAssetId || "";
+  if (!assetId) return { label: "", tone: "" };
+
+  const transfer = photoTransferStatus.get(assetId);
+  if (transfer?.status === "upload-failed") return { label: "photo upload failed - retrying", tone: "error" };
+  if (transfer?.status === "download-failed") return { label: "photo download failed - retrying", tone: "error" };
+  if (photoUploads.has(assetId)) return { label: "uploading photo...", tone: "pending" };
+  if (photoDownloads.has(assetId)) return { label: "downloading photo...", tone: "pending" };
+
+  const cached = Boolean(getCachedPhotoUrl(assetId));
+  if (!entry.photoUploadedAt && cached && state.settings.syncBaseUrl) return { label: "photo pending upload", tone: "pending" };
+  if (!entry.photoUploadedAt && cached) return { label: "photo saved locally", tone: "local" };
+  if (entry.photoUploadedAt && cached) return { label: "photo cached", tone: "ready" };
+  if (entry.photoUploadedAt) return { label: "photo ready to download", tone: "pending" };
+  return { label: "photo pending upload", tone: "pending" };
+}
+
+function setPhotoTransferStatus(assetId, status, error = "") {
+  const id = String(assetId || "");
+  if (!id) return;
+
+  if (status) {
+    photoTransferStatus.set(id, {
+      status,
+      error: error instanceof Error ? error.message : String(error || "")
+    });
+    schedulePhotoRetry(id);
+    return;
+  }
+
+  photoTransferStatus.delete(id);
+  clearTimeout(photoRetryTimers.get(id));
+  photoRetryTimers.delete(id);
+}
+
+function schedulePhotoRetry(assetId) {
+  const id = String(assetId || "");
+  if (!id || photoRetryTimers.has(id)) return;
+
+  const timer = setTimeout(() => {
+    photoRetryTimers.delete(id);
+    schedulePhotoWork();
+  }, 12000);
+  photoRetryTimers.set(id, timer);
+}
+
 function currentPositionLabel() {
   if (state.lastPosition) return `${state.lastPosition.lat.toFixed(5)}, ${state.lastPosition.lng.toFixed(5)}`;
   return state.geolocationMessage || "location status unknown";
@@ -626,8 +710,10 @@ async function refreshPhotoAssets() {
 async function ensureEntryPhotoCached(entry) {
   const assetId = entry?.photoAssetId || "";
   if (!assetId || getCachedPhotoUrl(assetId) || photoDownloads.has(assetId)) return;
+  if (photoTransferStatus.get(assetId)?.status === "download-failed" && photoRetryTimers.has(assetId)) return;
 
   photoDownloads.add(assetId);
+  setPhotoTransferStatus(assetId, "");
   try {
     if (!(await hasPhotoAsset(assetId))) {
       if (!entry.photoUploadedAt || !state.settings.syncBaseUrl) return;
@@ -638,16 +724,22 @@ async function ensureEntryPhotoCached(entry) {
     await ensurePhotoObjectUrl(assetId);
     renderAll();
     syncOpenViews();
+  } catch (error) {
+    setPhotoTransferStatus(assetId, "download-failed", error);
   } finally {
     photoDownloads.delete(assetId);
+    renderAll();
+    syncOpenViews();
   }
 }
 
 async function uploadPendingPhotoForEntry(entry) {
   const assetId = entry?.photoAssetId || "";
   if (!assetId || entry.photoUploadedAt || !state.settings.syncBaseUrl || photoUploads.has(assetId)) return;
+  if (photoTransferStatus.get(assetId)?.status === "upload-failed" && photoRetryTimers.has(assetId)) return;
 
   photoUploads.add(assetId);
+  setPhotoTransferStatus(assetId, "");
   try {
     const asset = await getPhotoAsset(assetId);
     if (!asset?.blob) return;
@@ -660,8 +752,12 @@ async function uploadPendingPhotoForEntry(entry) {
       renderAll();
       syncOpenViews();
     }
+  } catch (error) {
+    setPhotoTransferStatus(assetId, "upload-failed", error);
   } finally {
     photoUploads.delete(assetId);
+    renderAll();
+    syncOpenViews();
   }
 }
 
@@ -1534,12 +1630,20 @@ function renderEntryPhoto(entry, variant = "summary") {
   if (!entryHasPhoto(entry)) return "";
 
   const url = getCachedPhotoUrl(entry.photoAssetId);
+  const status = photoStatus(entry);
+  const statusHtml = status.label && status.tone !== "ready"
+    ? `<div class="photo-status ${esc(status.tone)}">${esc(status.label)}</div>`
+    : "";
+
   if (url) {
-    return `<img class="entry-photo ${esc(variant)}" src="${esc(url)}" alt="${esc(entry.title || "entry photo")}" loading="lazy">`;
+    return `
+      <img class="entry-photo ${esc(variant)}" src="${esc(url)}" alt="${esc(entry.title || "entry photo")}" loading="lazy">
+      ${statusHtml}
+    `;
   }
 
   ensureEntryPhotoCached(entry).catch(() => {});
-  const label = entry.photoUploadedAt ? "loading photo..." : "photo pending upload";
+  const label = status.label || (entry.photoUploadedAt ? "loading photo..." : "photo pending upload");
   return `<div class="entry-photo-placeholder ${esc(variant)}">${esc(label)}</div>`;
 }
 
@@ -1566,7 +1670,7 @@ function closeEntry() {
   entryMap = destroyMap(entryMap);
   closeOverlay("entry-overlay");
   state.currentEntryId = null;
-  state.pendingDeleteEntryId = null;
+  clearConfirmation("entry");
 }
 
 function renderEntry() {
@@ -1583,12 +1687,6 @@ function renderEntry() {
         <button class="action-link" data-action="edit-entry" type="button">EDIT</button>
         <div class="delete-action-cluster">
           <button class="action-link destructive" data-action="delete-entry" type="button">DELETE</button>
-          ${state.pendingDeleteEntryId === entry.id ? `
-            <div class="delete-confirm-row">
-              <button class="action-link destructive" data-action="confirm-delete-entry" type="button">OK</button>
-              <button class="action-link secondary" data-action="cancel-delete-entry" type="button">CANCEL</button>
-            </div>
-          ` : ""}
         </div>
       </div>
     `;
@@ -1626,8 +1724,9 @@ function openCompose(entryId = "") {
   state.entryPhotoDraft = null;
   state.entryPhotoRemoved = false;
   state.entryPhotoError = "";
+  state.entryPhotoNote = "";
   state.composeInitialSnapshot = composeSnapshotFromEntry(entry);
-  state.composeDiscardConfirm = false;
+  clearConfirmation("compose");
   renderCompose();
   openOverlay("compose-overlay");
   requestAnimationFrame(() => $("entry-description-input")?.focus());
@@ -1635,9 +1734,7 @@ function openCompose(entryId = "") {
 
 function requestCloseCompose() {
   if (hasUnsavedComposeChanges()) {
-    state.composeDiscardConfirm = true;
-    renderCompose();
-    requestAnimationFrame(() => $("compose-discard-no")?.focus());
+    openConfirmation("compose", "You have unsaved changes. Discard them?", "discard-compose");
     return;
   }
 
@@ -1656,8 +1753,9 @@ function closeCompose() {
   state.entryPhotoDraft = null;
   state.entryPhotoRemoved = false;
   state.entryPhotoError = "";
+  state.entryPhotoNote = "";
   state.composeInitialSnapshot = null;
-  state.composeDiscardConfirm = false;
+  clearConfirmation("compose");
 }
 
 function captureEntryFormDraft() {
@@ -1776,11 +1874,16 @@ function renderPhotoField(entry) {
   const existing = !state.entryPhotoRemoved && entryHasPhoto(entry) ? entry : null;
   const photo = draft || existing;
   const url = photo?.photoAssetId ? getCachedPhotoUrl(photo.photoAssetId) : "";
-  const helper = state.entryPhotoError || (
-    photo?.photoAssetId
-      ? `${photo.photoWidth || "?"} x ${photo.photoHeight || "?"}`
-      : "optional"
-  );
+  const status = photoStatus(photo);
+  const helperParts = [];
+  if (photo?.photoAssetId) {
+    helperParts.push(`${photo.photoWidth || "?"} x ${photo.photoHeight || "?"}`);
+    if (status.label) helperParts.push(status.label);
+  } else {
+    helperParts.push("optional");
+  }
+  if (state.entryPhotoNote) helperParts.push(state.entryPhotoNote);
+  const helper = state.entryPhotoError || helperParts.filter(Boolean).join(" | ");
 
   if (photo?.photoAssetId) {
     ensureEntryPhotoCached(photo).catch(() => {});
@@ -1795,7 +1898,7 @@ function renderPhotoField(entry) {
       ${url ? `<img class="photo-preview" src="${esc(url)}" alt="selected photo">` : photo?.photoAssetId ? `<div class="entry-photo-placeholder form">loading photo...</div>` : ""}
       <input class="file-input" id="entry-photo-input" type="file" accept="image/*">
       <label class="action-link file-picker-link" for="entry-photo-input">${photo?.photoAssetId ? "CHANGE PHOTO" : "CHOOSE PHOTO"}</label>
-      <span class="field-helper ${state.entryPhotoError ? "accent" : ""}">${esc(helper)}</span>
+      <span class="field-helper ${state.entryPhotoError || status.tone === "error" ? "accent" : ""}">${esc(helper)}</span>
     </div>
   `;
 }
@@ -1813,13 +1916,6 @@ function renderCompose() {
   $("compose-body").innerHTML = `
     <div class="map-panel compact"><div class="map-canvas" id="compose-location-map"></div></div>
     <button class="back-btn" data-action="compose-back" type="button">BACK</button>
-    ${state.composeDiscardConfirm ? `
-      <div class="discard-confirm" role="status">
-        <span>Unsaved changes. Discard them?</span>
-        <button class="action-link destructive" data-action="confirm-discard-compose" type="button">YES</button>
-        <button class="action-link secondary" data-action="cancel-discard-compose" id="compose-discard-no" type="button">NO</button>
-      </div>
-    ` : ""}
     <h2 class="screen-title">${esc(title)}</h2>
     <div class="trip-route" style="margin-bottom:20px;">in <em>${esc(trip?.title || "")}</em></div>
 
@@ -1860,7 +1956,7 @@ async function geocodeEntryLocationFromForm() {
   captureEntryFormDraft();
   const input = $("location-query-input");
   const query = input?.value || "";
-  state.composeDiscardConfirm = false;
+  clearConfirmation("compose");
   state.entryLocationQuery = query;
   state.entryLocationError = "";
 
@@ -1880,18 +1976,21 @@ async function geocodeEntryLocationFromForm() {
 
 async function selectEntryPhoto(file) {
   captureEntryFormDraft();
-  state.composeDiscardConfirm = false;
+  clearConfirmation("compose");
   state.entryPhotoError = "processing photo...";
+  state.entryPhotoNote = "";
   renderCompose();
 
   const processed = await processPhotoFile(file);
   state.entryPhotoDraft = processed.metadata;
   state.entryPhotoRemoved = false;
   state.entryPhotoError = "";
+  const photoNotes = [];
 
   if (processed.exif?.capturedAt && !state.composeEntryId) {
     state.entryFormDraft ||= {};
     state.entryFormDraft.timestampInput = toDateTimeInputValue(processed.exif.capturedAt);
+    photoNotes.push("time from photo");
   }
 
   if (Number.isFinite(processed.exif?.lat) && Number.isFinite(processed.exif?.lng)) {
@@ -1914,8 +2013,10 @@ async function selectEntryPhoto(file) {
       };
     }
     state.entryLocationQuery = state.entryLocationDraft.locationQuery;
+    photoNotes.push("location from photo");
   }
 
+  state.entryPhotoNote = photoNotes.join(" | ");
   renderCompose();
   toast("photo added");
 }
@@ -2020,7 +2121,7 @@ function deleteCurrentEntry() {
   queueLocalMutation("entry", entry.id, "_delete", true);
 
   saveAndFlushSync();
-  state.pendingDeleteEntryId = null;
+  clearConfirmation("entry");
   closeEntry();
   renderTrip();
   renderAll();
@@ -2040,7 +2141,7 @@ function openTripForm() {
 function closeTripForm() {
   closeOverlay("trip-form-overlay");
   state.editingTripId = null;
-  state.pendingDeleteTripId = null;
+  clearConfirmation("trip-form");
 }
 
 function renderTripForm() {
@@ -2071,12 +2172,6 @@ function renderTripForm() {
       <button class="action-link" data-action="save-trip" type="button">SAVE</button>
       <div class="delete-action-cluster">
         <button class="action-link destructive" data-action="delete-trip" type="button">DELETE</button>
-        ${state.pendingDeleteTripId === trip.id ? `
-          <div class="delete-confirm-row">
-            <button class="action-link destructive" data-action="confirm-delete-trip" type="button">OK</button>
-            <button class="action-link secondary" data-action="cancel-delete-trip" type="button">CANCEL</button>
-          </div>
-        ` : ""}
       </div>
       <button class="action-link secondary" data-action="trip-form-back" type="button">CANCEL</button>
     </div>
@@ -2125,7 +2220,7 @@ function deleteCurrentTrip() {
   queueLocalMutation("trip", trip.id, "_delete", true);
 
   saveAndFlushSync();
-  state.pendingDeleteTripId = null;
+  clearConfirmation("trip-form");
   closeTripForm();
   closeTrip();
   renderAll();
@@ -2252,6 +2347,35 @@ function closeTopOverlay() {
   if ($("compose-overlay").classList.contains("active")) return requestCloseCompose();
   if ($("entry-overlay").classList.contains("active")) return closeEntry();
   if ($("trip-overlay").classList.contains("active")) return closeTrip();
+}
+
+function handleConfirmationAction(confirmed) {
+  const confirmation = state.confirmation;
+  if (!confirmation) return;
+
+  if (!confirmed) {
+    const view = confirmation.view;
+    clearConfirmation(view);
+    return;
+  }
+
+  clearConfirmation(confirmation.view);
+
+  if (confirmation.action === "delete-entry") {
+    state.currentEntryId = confirmation.contextId;
+    runAction(deleteCurrentEntry);
+    return;
+  }
+
+  if (confirmation.action === "delete-trip") {
+    state.editingTripId = confirmation.contextId;
+    runAction(deleteCurrentTrip);
+    return;
+  }
+
+  if (confirmation.action === "discard-compose") {
+    closeCompose();
+  }
 }
 
 function syncOpenViews() {
@@ -2395,6 +2519,12 @@ function bindEvents() {
   const input = $("main-input");
   const status = $("input-status");
   const linkDeviceButton = $("link-device-btn");
+  $("confirm-root")?.addEventListener("click", event => {
+    const action = event.target.closest("[data-action]");
+    if (!action) return;
+    if (action.dataset.action === "confirm-toast-yes") return handleConfirmationAction(true);
+    if (action.dataset.action === "confirm-toast-no") return handleConfirmationAction(false);
+  });
 
   input.addEventListener("input", () => {
     const value = input.value.trim();
@@ -2453,29 +2583,17 @@ function bindEvents() {
     if (action.dataset.action === "delete-entry") {
       const entry = getEntry(state.currentEntryId);
       if (entry && isReadOnlyTrip(getTrip(entry.tripId))) return toast("Shared trips are read only for now.");
-      state.pendingDeleteEntryId = state.currentEntryId;
-      return renderEntry();
+      return openConfirmation("entry", "Delete this entry?", "delete-entry", state.currentEntryId);
     }
-    if (action.dataset.action === "cancel-delete-entry") {
-      state.pendingDeleteEntryId = null;
-      return renderEntry();
-    }
-    if (action.dataset.action === "confirm-delete-entry") return runAction(deleteCurrentEntry);
   });
 
   $("compose-overlay").addEventListener("click", event => {
     const action = event.target.closest("[data-action]");
     if (!action) return;
     if (action.dataset.action === "compose-back") return requestCloseCompose();
-    if (action.dataset.action === "confirm-discard-compose") return closeCompose();
-    if (action.dataset.action === "cancel-discard-compose") {
-      state.composeDiscardConfirm = false;
-      renderCompose();
-      return;
-    }
     if (action.dataset.action === "change-entry-location") {
       captureEntryFormDraft();
-      state.composeDiscardConfirm = false;
+      clearConfirmation("compose");
       state.isChangingEntryLocation = true;
       state.entryLocationError = "";
       renderCompose();
@@ -2484,7 +2602,7 @@ function bindEvents() {
     }
     if (action.dataset.action === "cancel-location-change") {
       captureEntryFormDraft();
-      state.composeDiscardConfirm = false;
+      clearConfirmation("compose");
       state.isChangingEntryLocation = false;
       state.entryLocationError = "";
       renderCompose();
@@ -2492,10 +2610,11 @@ function bindEvents() {
     }
     if (action.dataset.action === "remove-entry-photo") {
       captureEntryFormDraft();
-      state.composeDiscardConfirm = false;
+      clearConfirmation("compose");
       state.entryPhotoDraft = null;
       state.entryPhotoRemoved = true;
       state.entryPhotoError = "";
+      state.entryPhotoNote = "";
       renderCompose();
       return;
     }
@@ -2537,14 +2656,8 @@ function bindEvents() {
     if (action.dataset.action === "delete-trip") {
       const trip = getTrip(state.editingTripId);
       if (isReadOnlyTrip(trip)) return toast("Shared trips are read only for now.");
-      state.pendingDeleteTripId = state.editingTripId;
-      return renderTripForm();
+      return openConfirmation("trip-form", "Delete this trip?", "delete-trip", state.editingTripId);
     }
-    if (action.dataset.action === "cancel-delete-trip") {
-      state.pendingDeleteTripId = null;
-      return renderTripForm();
-    }
-    if (action.dataset.action === "confirm-delete-trip") return runAction(deleteCurrentTrip);
   });
 
   $("link-overlay").addEventListener("click", event => {

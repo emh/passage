@@ -671,6 +671,18 @@ h1 {
   min-height: 140px;
 }
 
+.photo-status {
+  margin: -6px 0 12px;
+  color: var(--ink-light);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0;
+}
+
+.photo-status.error {
+  color: var(--red);
+}
+
 .entry-link {
   display: inline-block;
   color: var(--link);
@@ -786,19 +798,7 @@ h1 {
   align-items: flex-start;
 }
 
-.delete-confirm-row {
-  display: flex;
-  gap: 16px;
-  align-items: baseline;
-  margin-top: -8px;
-}
-
-.delete-confirm-row .action-link {
-  padding-top: 0;
-  padding-bottom: 4px;
-}
-
-.discard-confirm {
+.confirm-toast {
   position: fixed;
   z-index: 240;
   right: 18px;
@@ -821,7 +821,7 @@ h1 {
   letter-spacing: 0;
 }
 
-.discard-confirm .action-link {
+.confirm-toast .action-link {
   padding: 0;
 }
 
