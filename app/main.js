@@ -1,19 +1,28 @@
 import {
+  applyMutations,
+  applyMutation,
+  compareHlc,
+  createMutation,
   createJournalEntry,
   createTrip,
   daysBetween,
+  ENTRY_FIELDS,
   entriesForTrip,
   fromDateTimeInputValue,
   isTripActive,
   isTripPast,
+  normalizeCode,
   normalizeEntry,
+  normalizeProfile,
   normalizeTrip,
+  TRIP_FIELDS,
   toDateTimeInputValue,
   tripEntryCounts,
   visibleEntries,
   visibleTrips
 } from "./model.js";
-import { loadAppState, saveAppState } from "./storage.js";
+import { loadAppState, loadSettings, saveAppState } from "./storage.js";
+import { createRemoteProfile, fetchRemoteProfile, PassageSync } from "./sync.js";
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
@@ -33,8 +42,11 @@ const MARKER_STYLE = {
 };
 
 const loadedState = loadAppState();
+const settings = loadSettings();
 const state = {
   ...loadedState,
+  settings,
+  syncStatus: settings.syncBaseUrl ? "unlinked" : "local",
   search: "",
   currentTripId: null,
   currentEntryId: null,
@@ -42,6 +54,9 @@ const state = {
   editingTripId: null,
   pendingDeleteEntryId: null,
   pendingDeleteTripId: null,
+  pendingLinkCode: "",
+  linkBusy: false,
+  linkError: "",
   isChangingEntryLocation: false,
   entryLocationDraft: null,
   entryLocationQuery: "",
@@ -58,6 +73,7 @@ const overlayFocusStack = [];
 let tripMap = null;
 let entryMap = null;
 let composeMap = null;
+let profileSync = null;
 
 function esc(value) {
   const div = document.createElement("div");
@@ -67,6 +83,21 @@ function esc(value) {
 
 function save() {
   saveAppState(state);
+}
+
+function syncQueue() {
+  return state.profileSync?.mutationQueue || [];
+}
+
+function saveAndFlushSync() {
+  save();
+  profileSync?.flush();
+}
+
+function runAction(fn) {
+  Promise.resolve(fn()).catch(error => {
+    toast(error instanceof Error ? error.message : String(error));
+  });
 }
 
 function toast(message) {
@@ -123,6 +154,32 @@ function renderLocationStatus() {
   const el = $("location-status");
   if (!el) return;
   el.textContent = state.geolocationMessage || "";
+}
+
+function syncIndicatorState() {
+  const pendingCount = syncQueue().length;
+  if (state.syncStatus === "syncing") return { tone: "syncing", label: "syncing" };
+  if (state.syncStatus === "synced") return { tone: "synced", label: "synced" };
+  if (state.syncStatus === "offline") return { tone: pendingCount ? "pending" : "ready", label: pendingCount ? `${plural(pendingCount, "change")} pending` : "offline" };
+  if (pendingCount) return { tone: "pending", label: `${plural(pendingCount, "change")} pending` };
+  if (!state.settings.syncBaseUrl) return { tone: "local", label: "local only" };
+  if (state.profile?.code) return { tone: "ready", label: "linked" };
+  return { tone: "ready", label: "ready to link" };
+}
+
+function renderSyncIndicator() {
+  const dot = $("sync-dot");
+  const link = $("link-device-btn");
+  if (!dot || !link) return;
+
+  const indicator = syncIndicatorState();
+  dot.classList.toggle("synced", indicator.tone === "synced");
+  dot.classList.toggle("pending", indicator.tone === "pending" || indicator.tone === "syncing");
+  dot.classList.toggle("ready", indicator.tone === "ready");
+  dot.classList.toggle("local", indicator.tone === "local");
+  dot.setAttribute("aria-label", indicator.label);
+  dot.title = indicator.label;
+  link.title = indicator.label;
 }
 
 function refreshCurrentPosition(options = {}) {
@@ -352,6 +409,37 @@ function entryMetaLine(entry, options = {}) {
 function currentPositionLabel() {
   if (state.lastPosition) return `${state.lastPosition.lat.toFixed(5)}, ${state.lastPosition.lng.toFixed(5)}`;
   return state.geolocationMessage || "location status unknown";
+}
+
+function queueLocalMutation(entityType, entityId, field, value) {
+  const mutation = createMutation(state, entityType, entityId, field, value);
+  if (applyMutation(state, mutation)) {
+    syncQueue().push(mutation);
+  }
+  return mutation;
+}
+
+function queueEntityCreate(entityType, record) {
+  return queueLocalMutation(entityType, record.id, "_create", record);
+}
+
+function queueEntityPatch(entityType, currentRecord, nextRecord, fields) {
+  let changed = 0;
+  for (const field of fields) {
+    if (field === "id") continue;
+    if (valuesEqual(currentRecord[field], nextRecord[field])) continue;
+    queueLocalMutation(entityType, currentRecord.id, field, nextRecord[field]);
+    changed += 1;
+  }
+  return changed;
+}
+
+function valuesEqual(left, right) {
+  if (Array.isArray(left) || Array.isArray(right)) {
+    if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) return false;
+    return left.every((value, index) => value === right[index]);
+  }
+  return left === right;
 }
 
 function geotaggedEntriesForTrip(tripId) {
@@ -601,8 +689,233 @@ function renderList() {
 
 function renderAll() {
   renderLocationStatus();
+  renderSyncIndicator();
   renderStats();
   renderList();
+}
+
+function hasLocalContent() {
+  return Boolean(visibleTrips(state.trips).length || visibleEntries(state.entries).length || syncQueue().length);
+}
+
+function applyRemotePayload(payload, options = {}) {
+  if (options.replaceLocal) {
+    state.trips = [];
+    state.entries = [];
+    state.tripClocks = {};
+    state.entryClocks = {};
+    state.profileSync.mutationQueue = [];
+    state.profileSync.lastSyncTimestamp = "";
+  }
+
+  if (Array.isArray(payload?.mutations)) {
+    applyMutations(state, payload.mutations);
+  }
+
+  const incomingProfile = normalizeProfile(payload?.profile) || normalizeProfile(payload?.room?.profile);
+  if (incomingProfile) {
+    state.profile = {
+      ...incomingProfile,
+      code: payload?.code || payload?.room?.code || incomingProfile.code || ""
+    };
+  } else if (payload?.code && state.profile) {
+    state.profile.code = payload.code;
+  }
+
+  if (Array.isArray(payload?.confirmedIds)) {
+    const confirmed = new Set(payload.confirmedIds);
+    state.profileSync.mutationQueue = syncQueue().filter(mutation => !confirmed.has(mutation.id));
+  }
+
+  if (payload?.highWatermark && compareHlc(payload.highWatermark, state.profileSync.lastSyncTimestamp) > 0) {
+    state.profileSync.lastSyncTimestamp = payload.highWatermark;
+  }
+}
+
+async function ensureProfileCode() {
+  if (!state.settings.syncBaseUrl) throw new Error("Linking is not available here yet.");
+  if (state.profile?.code) return state.profile.code;
+
+  const payload = await createRemoteProfile({
+    profile: state.profile,
+    mutations: syncQueue()
+  }, state.settings);
+
+  applyRemotePayload(payload);
+  save();
+  configureSync();
+  return state.profile?.code || "";
+}
+
+async function linkDevice(code, options = {}) {
+  const normalized = normalizeCode(code);
+  if (!normalized) throw new Error("Link is invalid.");
+  if (!state.settings.syncBaseUrl) throw new Error("Linking is not available here yet.");
+
+  state.linkBusy = true;
+  state.linkError = "";
+  renderLinkScreen();
+
+  try {
+    const payload = await fetchRemoteProfile(normalized, state.settings);
+    applyRemotePayload(payload, { replaceLocal: options.replaceLocal !== false });
+    state.pendingLinkCode = "";
+    stripLinkQuery();
+    save();
+    configureSync();
+    closeLinkScreen();
+    renderAll();
+    syncOpenViews();
+    toast("Device linked");
+  } catch (error) {
+    state.linkError = error instanceof Error ? error.message : "Device could not be linked.";
+    renderLinkScreen();
+    throw error;
+  } finally {
+    state.linkBusy = false;
+    if ($("link-overlay").classList.contains("active")) renderLinkScreen();
+  }
+}
+
+function deviceLinkUrl() {
+  if (!state.settings.syncBaseUrl || !state.profile?.code) return "";
+  const url = new URL(globalThis.location.href);
+  url.search = "";
+  url.hash = "";
+  url.searchParams.set("link", state.profile.code);
+  return url.toString();
+}
+
+function renderLinkScreen() {
+  const pendingCount = syncQueue().length;
+  const status = syncIndicatorState();
+  const linkUrl = deviceLinkUrl();
+  const incomingCode = normalizeCode(state.pendingLinkCode);
+  const linkCopy = state.linkBusy
+    ? "Preparing link..."
+    : linkUrl || (
+      state.settings.syncBaseUrl
+        ? "Open LINK to create a device URL."
+        : "Linking is not available here yet."
+    );
+
+  if (incomingCode) {
+    const counts = `${plural(visibleTrips(state.trips).length, "trip")} | ${plural(visibleEntries(state.entries).length, "entry", "entries")}`;
+    $("link-body").innerHTML = `
+      <button class="back-btn" data-action="cancel-link-device" type="button">BACK</button>
+      <h2 class="screen-title">Link this device</h2>
+      <div class="trip-route" style="margin-bottom:20px;">This will replace local data on this device.</div>
+
+      <div class="field">
+        <span class="field-label">Incoming link</span>
+        <span class="field-helper">${esc(incomingCode)}</span>
+      </div>
+
+      <div class="field">
+        <span class="field-label">On this device</span>
+        <span class="field-helper">${esc(counts)}</span>
+      </div>
+
+      ${state.linkError ? `
+        <div class="field">
+          <span class="field-helper accent">${esc(state.linkError)}</span>
+        </div>
+      ` : ""}
+
+      <div class="action-row">
+        <button class="action-link" data-action="confirm-link-device" type="button">${state.linkBusy ? "LINKING..." : "LINK DEVICE"}</button>
+        <button class="action-link secondary" data-action="cancel-link-device" type="button">CANCEL</button>
+      </div>
+    `;
+    return;
+  }
+
+  $("link-body").innerHTML = `
+    <button class="back-btn" data-action="link-back" type="button">BACK</button>
+    <h2 class="screen-title">Link device</h2>
+    <div class="trip-route" style="margin-bottom:20px;">${esc(status.label)}</div>
+
+    <div class="field">
+      <span class="field-label">Pending</span>
+      <span class="field-helper">${esc(pendingCount ? plural(pendingCount, "change") : "no pending changes")}</span>
+    </div>
+
+    <div class="field">
+      <span class="field-label">Link</span>
+      <span class="field-helper break-anywhere">${esc(linkCopy)}</span>
+    </div>
+
+    ${state.linkError ? `
+      <div class="field">
+        <span class="field-helper accent">${esc(state.linkError)}</span>
+      </div>
+    ` : ""}
+
+    ${linkUrl ? `
+      <div class="action-row">
+        <button class="action-link" data-action="copy-link" type="button">COPY</button>
+      </div>
+    ` : ""}
+  `;
+}
+
+async function openLinkScreen() {
+  state.linkError = "";
+  renderLinkScreen();
+  openOverlay("link-overlay");
+  requestAnimationFrame(() => $("link-body")?.focus());
+
+  if (!state.pendingLinkCode && state.settings.syncBaseUrl && !state.profile?.code && !state.linkBusy) {
+    state.linkBusy = true;
+    renderLinkScreen();
+    try {
+      await ensureProfileCode();
+    } catch (error) {
+      state.linkError = error instanceof Error ? error.message : "Link could not be prepared.";
+    } finally {
+      state.linkBusy = false;
+      renderLinkScreen();
+    }
+  }
+}
+
+function closeLinkScreen() {
+  state.linkBusy = false;
+  closeOverlay("link-overlay");
+}
+
+function stripLinkQuery() {
+  const url = new URL(globalThis.location.href);
+  if (!url.searchParams.has("link")) return;
+  url.searchParams.delete("link");
+  globalThis.history?.replaceState?.({}, "", url);
+}
+
+function handleLinkQuery() {
+  const params = new URLSearchParams(globalThis.location.search);
+  const code = normalizeCode(params.get("link"));
+  if (!code) return;
+
+  if (state.profile?.code === code) {
+    stripLinkQuery();
+    return;
+  }
+
+  if (!hasLocalContent()) {
+    runAction(() => linkDevice(code, { replaceLocal: true }));
+    return;
+  }
+
+  state.pendingLinkCode = code;
+  state.linkError = "";
+  openLinkScreen();
+}
+
+async function copyDeviceLink() {
+  const url = deviceLinkUrl();
+  if (!url) throw new Error("Link is not ready yet.");
+  await navigator.clipboard.writeText(url);
+  toast("Link copied");
 }
 
 function showTrip(tripId) {
@@ -916,10 +1229,12 @@ async function saveEntryFromForm() {
   if (state.composeEntryId) {
     const index = state.entries.findIndex(entry => entry.id === state.composeEntryId);
     if (index < 0) return;
-    state.entries[index] = normalizeEntry({
+    const currentEntry = state.entries[index];
+    const nextEntry = normalizeEntry({
       ...state.entries[index],
       ...fields
     });
+    queueEntityPatch("entry", currentEntry, nextEntry, ENTRY_FIELDS);
     toast("entry updated");
   } else {
     const position = state.entryLocationDraft ? null : await positionForNewEntry();
@@ -935,11 +1250,12 @@ async function saveEntryFromForm() {
     } else {
       fields.geotagStatus = state.geolocationStatus === "denied" ? "denied" : "unavailable";
     }
-    state.entries.push(createJournalEntry(trip.id, fields));
+    const entry = createJournalEntry(trip.id, fields);
+    queueEntityCreate("entry", entry);
     toast("entry saved");
   }
 
-  save();
+  saveAndFlushSync();
   closeCompose();
   if (state.currentEntryId) renderEntry();
   if (state.currentTripId) renderTrip();
@@ -950,16 +1266,9 @@ function deleteCurrentEntry() {
   const entry = getEntry(state.currentEntryId);
   if (!entry) return;
 
-  const index = state.entries.findIndex(candidate => candidate.id === entry.id);
-  if (index >= 0) {
-    state.entries[index] = normalizeEntry({
-      ...state.entries[index],
-      deleted: true,
-      dateUpdated: new Date().toISOString()
-    });
-  }
+  queueLocalMutation("entry", entry.id, "_delete", true);
 
-  save();
+  saveAndFlushSync();
   state.pendingDeleteEntryId = null;
   closeEntry();
   renderTrip();
@@ -1035,15 +1344,17 @@ function saveTripFromForm() {
   const index = state.trips.findIndex(candidate => candidate.id === trip.id);
   if (index < 0) return;
 
-  state.trips[index] = normalizeTrip({
+  const currentTrip = state.trips[index];
+  const nextTrip = normalizeTrip({
     ...state.trips[index],
     title,
     startIso: $("trip-start-input")?.value || trip.startIso,
     endIso: $("trip-end-input")?.value || trip.endIso,
     dateUpdated: new Date().toISOString()
   });
+  queueEntityPatch("trip", currentTrip, nextTrip, TRIP_FIELDS);
 
-  save();
+  saveAndFlushSync();
   closeTripForm();
   renderTrip();
   renderAll();
@@ -1054,15 +1365,12 @@ function deleteCurrentTrip() {
   const trip = getTrip(state.editingTripId);
   if (!trip) return;
 
-  const now = new Date().toISOString();
-  state.trips = state.trips.map(candidate => candidate.id === trip.id
-    ? normalizeTrip({ ...candidate, deleted: true, dateUpdated: now })
-    : candidate);
-  state.entries = state.entries.map(entry => entry.tripId === trip.id
-    ? normalizeEntry({ ...entry, deleted: true, dateUpdated: now })
-    : entry);
+  for (const entry of entriesForTrip(state.entries, trip.id)) {
+    queueLocalMutation("entry", entry.id, "_delete", true);
+  }
+  queueLocalMutation("trip", trip.id, "_delete", true);
 
-  save();
+  saveAndFlushSync();
   state.pendingDeleteTripId = null;
   closeTripForm();
   closeTrip();
@@ -1075,8 +1383,8 @@ function createTripFromInput(value) {
   if (!title) return;
 
   const trip = createTrip(title);
-  state.trips.unshift(trip);
-  save();
+  queueEntityCreate("trip", trip);
+  saveAndFlushSync();
 
   const input = $("main-input");
   input.value = "";
@@ -1177,15 +1485,97 @@ function syncBodyScroll() {
 }
 
 function closeTopOverlay() {
+  if ($("link-overlay").classList.contains("active")) return closeLinkScreen();
   if ($("trip-form-overlay").classList.contains("active")) return closeTripForm();
   if ($("compose-overlay").classList.contains("active")) return closeCompose();
   if ($("entry-overlay").classList.contains("active")) return closeEntry();
   if ($("trip-overlay").classList.contains("active")) return closeTrip();
 }
 
+function syncOpenViews() {
+  if (state.currentEntryId && !getEntry(state.currentEntryId)) {
+    closeEntry();
+  }
+
+  if (state.editingTripId && !getTrip(state.editingTripId)) {
+    closeTripForm();
+  }
+
+  if (state.currentTripId && !getTrip(state.currentTripId)) {
+    closeTrip();
+  }
+
+  if ($("trip-overlay").classList.contains("active") && state.currentTripId) {
+    renderTrip();
+  }
+
+  if ($("entry-overlay").classList.contains("active") && state.currentEntryId) {
+    renderEntry();
+  }
+
+  if ($("trip-form-overlay").classList.contains("active") && state.editingTripId) {
+    renderTripForm();
+  }
+
+  if ($("link-overlay").classList.contains("active")) {
+    renderLinkScreen();
+  }
+}
+
+function configureSync() {
+  if (!state.settings.syncBaseUrl) {
+    profileSync?.stop();
+    profileSync = null;
+    state.syncStatus = "local";
+    renderSyncIndicator();
+    return;
+  }
+
+  if (state.profile?.code) {
+    if (!profileSync || profileSync.code !== state.profile.code) {
+      profileSync?.stop();
+      profileSync = new PassageSync({
+        code: state.profile.code,
+        state,
+        save,
+        onStatus(status) {
+          state.syncStatus = status;
+          renderSyncIndicator();
+          if ($("link-overlay").classList.contains("active")) renderLinkScreen();
+        },
+        onChange() {
+          save();
+          renderAll();
+          syncOpenViews();
+        },
+        onRoom(room) {
+          const profile = normalizeProfile(room?.profile);
+          if (profile) {
+            state.profile = { ...profile, code: room.code || profile.code || "" };
+            save();
+          } else if (room?.code && state.profile) {
+            state.profile.code = room.code;
+            save();
+          }
+          renderSyncIndicator();
+        }
+      });
+      profileSync.start();
+      return;
+    }
+    return;
+  }
+
+  profileSync?.stop();
+  profileSync = null;
+  state.syncStatus = "unlinked";
+  renderSyncIndicator();
+}
+
 function bindEvents() {
   const input = $("main-input");
   const status = $("input-status");
+  const linkDeviceButton = $("link-device-btn");
 
   input.addEventListener("input", () => {
     const value = input.value.trim();
@@ -1212,6 +1602,10 @@ function bindEvents() {
   $("trip-list").addEventListener("click", event => {
     const item = event.target.closest(".trip-item");
     if (item) showTrip(item.dataset.tripId);
+  });
+
+  linkDeviceButton?.addEventListener("click", () => {
+    runAction(openLinkScreen);
   });
 
   $("trip-overlay").addEventListener("click", event => {
@@ -1305,6 +1699,21 @@ function bindEvents() {
     if (action.dataset.action === "confirm-delete-trip") return deleteCurrentTrip();
   });
 
+  $("link-overlay").addEventListener("click", event => {
+    const action = event.target.closest("[data-action]");
+    if (!action) return;
+    if (action.dataset.action === "link-back") return closeLinkScreen();
+    if (action.dataset.action === "copy-link") return runAction(copyDeviceLink);
+    if (action.dataset.action === "confirm-link-device") return runAction(() => linkDevice(state.pendingLinkCode, { replaceLocal: true }));
+    if (action.dataset.action === "cancel-link-device") {
+      state.pendingLinkCode = "";
+      state.linkError = "";
+      stripLinkQuery();
+      closeLinkScreen();
+      renderAll();
+    }
+  });
+
   document.addEventListener("keydown", event => {
     if (event.key === "Escape") closeTopOverlay();
   });
@@ -1316,6 +1725,8 @@ function init() {
   });
   bindEvents();
   renderAll();
+  configureSync();
+  handleLinkQuery();
   initGeolocation();
 }
 

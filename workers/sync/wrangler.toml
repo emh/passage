@@ -1,0 +1,11 @@
+name = "passage-sync"
+main = "src/index.js"
+compatibility_date = "2026-04-20"
+
+[[durable_objects.bindings]]
+name = "PASSAGE_PROFILE_ROOM"
+class_name = "PassageProfileRoom"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["PassageProfileRoom"]

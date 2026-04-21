@@ -11,7 +11,13 @@
 <body>
   <main id="app" tabindex="-1">
     <header>
-      <h1>passage</h1>
+      <div class="title-row">
+        <h1>passage</h1>
+        <div class="title-actions">
+          <span class="sync-dot local" id="sync-dot" aria-label="local only" title="local only"></span>
+          <button class="action-link header-link" id="link-device-btn" data-action="open-link" type="button">LINK</button>
+        </div>
+      </div>
       <p class="stats" id="stats">loading...</p>
       <p class="location-status" id="location-status">checking location...</p>
     </header>
@@ -48,8 +54,13 @@
     <div class="overlay-body" id="trip-form-body" tabindex="-1"></div>
   </section>
 
+  <section class="overlay" id="link-overlay" aria-hidden="true">
+    <div class="overlay-body" id="link-body" tabindex="-1"></div>
+  </section>
+
   <div class="toast" id="toast"></div>
 
+  <script src="./config.js"></script>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script type="module" src="./main.js"></script>
 </body>
