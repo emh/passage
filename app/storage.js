@@ -27,6 +27,7 @@ export function createInitialState() {
     commentClocks: {},
     profileStateClocks: {},
     activitySeenAt: "",
+    tripActivitySeenAt: {},
     profileSync: createSyncState(),
     sharedTripSync: {}
   };
@@ -98,6 +99,7 @@ export function normalizeStoredState(data = {}) {
     commentClocks: plainObject(data.commentClocks),
     profileStateClocks: plainObject(data.profileStateClocks),
     activitySeenAt: typeof data.activitySeenAt === "string" ? data.activitySeenAt : "",
+    tripActivitySeenAt: normalizeSeenAtMap(data.tripActivitySeenAt),
     profileSync: normalizeSyncState(data.profileSync),
     sharedTripSync: normalizeSharedTripSync(data.sharedTripSync)
   };
@@ -134,6 +136,7 @@ function serializeState(state) {
     commentClocks: state.commentClocks || {},
     profileStateClocks: state.profileStateClocks || {},
     activitySeenAt: typeof state.activitySeenAt === "string" ? state.activitySeenAt : "",
+    tripActivitySeenAt: normalizeSeenAtMap(state.tripActivitySeenAt),
     profileSync: normalizeSyncState(state.profileSync),
     sharedTripSync: normalizeSharedTripSync(state.sharedTripSync)
   };
@@ -187,6 +190,19 @@ function normalizeSharedTripSync(input) {
     const normalized = String(code || "").trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
     if (!normalized) continue;
     result[normalized] = normalizeSyncState(syncState);
+  }
+
+  return result;
+}
+
+function normalizeSeenAtMap(input) {
+  const result = {};
+  if (!input || typeof input !== "object" || Array.isArray(input)) return result;
+
+  for (const [tripId, seenAt] of Object.entries(input)) {
+    const id = String(tripId || "").trim();
+    const value = typeof seenAt === "string" ? seenAt : "";
+    if (id && value) result[id] = value;
   }
 
   return result;

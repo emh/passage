@@ -4,12 +4,12 @@ import {
   compareHlc,
   ENTRY_FIELDS,
   ENTITY_TYPES,
+  isProfileStateField,
   normalizeCode,
   normalizeComment,
   normalizeEntry,
   normalizeProfile,
   normalizeTrip,
-  PROFILE_STATE_FIELDS,
   TRIP_FIELDS
 } from "../../../app/model.js";
 
@@ -259,6 +259,7 @@ export class PassageProfileRoom {
         entries: state.entries,
         comments: state.comments,
         activitySeenAt: state.activitySeenAt || "",
+        tripActivitySeenAt: state.tripActivitySeenAt || {},
         highWatermark: await this.highWatermark()
       }
       : {
@@ -499,6 +500,7 @@ export function materializeMutations(mutations, room) {
     entryClocks: {},
     commentClocks: {},
     profileStateClocks: {},
+    tripActivitySeenAt: {},
     profileSync: { mutationQueue: [], lastSyncTimestamp: "" },
     sharedTripSync: {}
   };
@@ -560,7 +562,7 @@ function validateCommentMutation(mutation, room) {
 function validateProfileStateMutation(mutation, room) {
   if (room.type !== "profile") throw new Error("Invalid profile state");
   if (room.profile?.id && mutation.entityId !== room.profile.id) throw new Error("Invalid profile state");
-  if (!PROFILE_STATE_FIELDS.includes(mutation.field)) throw new Error("Invalid profile state field");
+  if (!isProfileStateField(mutation.field)) throw new Error("Invalid profile state field");
   return mutation;
 }
 

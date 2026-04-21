@@ -50,6 +50,40 @@ test("trip rooms normalize share metadata and restrict to one trip", () => {
   }), room), /Invalid trip/);
 });
 
+test("trip rooms accept and materialize collaborator updates", () => {
+  const room = normalizeTripRoom({
+    code: "trip-12",
+    trip: { id: "trip-1", title: "Road trip", ownerProfileId: "profile-1", ownerName: "Evan" }
+  });
+  const collaborator = {
+    profileId: "profile-2",
+    name: "Avery",
+    joinedAt: "2026-04-21T12:00:00.000Z"
+  };
+  const createTrip = mutation({
+    id: "trip-create",
+    entityType: "trip",
+    entityId: "trip-1",
+    field: "_create",
+    timestamp: hlc(100),
+    value: { id: "trip-1", title: "Road trip", startIso: "2026-04-01", endIso: "2026-04-03" }
+  });
+  const addCollaborator = mutation({
+    id: "trip-collaborator",
+    entityType: "trip",
+    entityId: "trip-1",
+    field: "collaborators",
+    timestamp: hlc(101),
+    profileId: "profile-2",
+    value: [collaborator]
+  });
+
+  assert.equal(validateMutation(addCollaborator, room).field, "collaborators");
+
+  const visible = materializeMutations([createTrip, addCollaborator], room);
+  assert.deepEqual(visible.trips[0].collaborators, [collaborator]);
+});
+
 test("worker validation accepts trip, entry, comment, and profile state mutations for the room profile", () => {
   const room = normalizeProfileRoom({
     code: "pass1234",
@@ -83,11 +117,18 @@ test("worker validation accepts trip, entry, comment, and profile state mutation
     field: "activitySeenAt",
     value: "2026-04-21T12:00:00.000Z"
   }), room);
+  const tripProfileState = validateMutation(mutation({
+    entityType: "profileState",
+    entityId: "profile-1",
+    field: "tripActivitySeenAt:trip-1",
+    value: "2026-04-21T13:00:00.000Z"
+  }), room);
 
   assert.equal(trip.value.title, "Road trip");
   assert.equal(entry.value.tripId, "trip-1");
   assert.equal(comment.value.body, "Great spot.");
   assert.equal(profileState.value, "2026-04-21T12:00:00.000Z");
+  assert.equal(tripProfileState.field, "tripActivitySeenAt:trip-1");
 });
 
 test("worker materialization applies entry updates and comments, ignores legacy reactions, and filters deleted records", () => {

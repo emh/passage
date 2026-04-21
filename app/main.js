@@ -5,6 +5,7 @@ import {
   commentsForEntry,
   compareHlc,
   createComment,
+  createId,
   createMutation,
   createEntry,
   createTrip,
@@ -23,6 +24,7 @@ import {
   normalizeUserName,
   TRIP_FIELDS,
   toDateTimeInputValue,
+  tripActivitySeenField,
   tripEntryCounts,
   visibleComments,
   visibleEntries,
@@ -80,10 +82,15 @@ const state = {
   composeInitialSnapshot: null,
   commentDraft: "",
   inlineCommentDrafts: new Map(),
+  pendingComment: null,
+  selectedCommentId: "",
   editingCommentId: "",
   commentEditDraft: "",
   expandedCommentEntryIds: new Set(),
+  activityTripId: "",
+  entryReturnTo: "",
   activitySeenAt: loadedState.activitySeenAt || "",
+  tripActivitySeenAt: loadedState.tripActivitySeenAt || {},
   confirmation: null,
   geolocationStatus: "checking",
   geolocationMessage: "checking location...",
@@ -93,6 +100,7 @@ const state = {
 const $ = id => document.getElementById(id);
 let toastTimer;
 const overlayFocusStack = [];
+let overlayZIndex = 300;
 let tripMap = null;
 let entryMap = null;
 let composeMap = null;
@@ -434,10 +442,6 @@ function routeLabel(trip) {
   return cities.length ? cities.join(" - ") : "no cities yet";
 }
 
-function isReadOnlyTrip(trip) {
-  return isTripSharedByOtherProfile(trip, state.profile);
-}
-
 function isCurrentProfile(profileId, name = "") {
   const currentId = String(state.profile?.id || "").trim();
   const candidateId = String(profileId || "").trim();
@@ -452,6 +456,28 @@ function isTripOwner(trip) {
   return isCurrentProfile(trip?.ownerProfileId, trip?.ownerName);
 }
 
+function tripCollaborators(trip) {
+  const ownerId = String(trip?.ownerProfileId || "").trim();
+  const ownerName = normalizeUserName(trip?.ownerName);
+  return Array.isArray(trip?.collaborators)
+    ? trip.collaborators.filter(collaborator => {
+      const profileId = String(collaborator?.profileId || "").trim();
+      const name = normalizeUserName(collaborator?.name);
+      if (ownerId && profileId && ownerId === profileId) return false;
+      if (!ownerId && ownerName && name && ownerName === name) return false;
+      return Boolean(profileId || name);
+    })
+    : [];
+}
+
+function isTripCollaborator(trip) {
+  return tripCollaborators(trip).some(collaborator => isCurrentProfile(collaborator.profileId, collaborator.name));
+}
+
+function isReadOnlyTrip(trip) {
+  return isTripSharedByOtherProfile(trip, state.profile) && !isTripCollaborator(trip);
+}
+
 function isCommentAuthor(comment) {
   return isCurrentProfile(comment?.authorProfileId, comment?.authorName);
 }
@@ -464,10 +490,31 @@ function canDeleteComment(comment) {
   return isCommentAuthor(comment) || isTripOwner(getTrip(comment?.tripId));
 }
 
+function canManageEntry(entry) {
+  return isTripOwner(getTrip(entry?.tripId)) || isCurrentProfile(entry?.authorProfileId, entry?.authorName);
+}
+
 function tripSharedByLabel(trip) {
   if (!trip?.sharedCode || !trip?.ownerName) return "";
   if (!isReadOnlyTrip(trip)) return "";
   return `shared by ${trip.ownerName}`;
+}
+
+function tripParticipantNames(trip) {
+  if (!tripCollaborators(trip).length) return [];
+  return uniqueLabels([
+    trip?.ownerName || "",
+    ...tripCollaborators(trip).map(collaborator => collaborator.name)
+  ].filter(Boolean));
+}
+
+function tripParticipantsLabel(trip) {
+  return tripParticipantNames(trip).join(", ");
+}
+
+function renderTripParticipants(trip) {
+  const label = tripParticipantsLabel(trip);
+  return label ? `<div class="trip-participants">${esc(label)}</div>` : "";
 }
 
 function entryRouteLabel(entry) {
@@ -517,12 +564,15 @@ function tripAuthors(tripId) {
 }
 
 function showEntryAuthors(tripId) {
-  return tripAuthors(tripId).length > 1;
+  return entriesForTrip(state.entries, tripId)
+    .some(entry => entry.authorName && !isCurrentProfile(entry.authorProfileId, entry.authorName));
 }
 
 function entryMetaLine(entry, options = {}) {
   const parts = [];
-  if (options.includeAuthor && entry.authorName) parts.push(entry.authorName);
+  if (options.includeAuthor && entry.authorName && !isCurrentProfile(entry.authorProfileId, entry.authorName)) {
+    parts.push(entry.authorName);
+  }
   if (options.includeDate) parts.push(formatDate(entry.timestamp.slice(0, 10)));
   parts.push(formatTime(entry.timestamp));
   const location = options.shortLocation ? entryRouteLabel(entry) : entryLocationLabel(entry);
@@ -665,9 +715,9 @@ function currentPositionLabel() {
   return state.geolocationMessage || "location status unknown";
 }
 
-function queueLocalMutation(entityType, entityId, field, value) {
+function queueLocalMutation(entityType, entityId, field, value, options = {}) {
   const trip = tripForLocalMutation(entityType, entityId, value);
-  if (entityType === "trip" || entityType === "entry") {
+  if (!options.skipWritableCheck && (entityType === "trip" || entityType === "entry")) {
     assertTripWritable(trip);
   }
 
@@ -1048,16 +1098,19 @@ function renderList() {
     const past = isTripPast(trip);
     const days = daysBetween(trip.startIso, trip.endIso);
     const sharedBy = tripSharedByLabel(trip);
+    const participants = tripParticipantsLabel(trip);
+    const activity = renderTripCardActivity(trip);
 
     return `
       <article class="trip-item ${past ? "past" : ""}" data-trip-id="${esc(trip.id)}">
         <div class="trip-meta">
           <span>${esc(formatDateRange(trip.startIso, trip.endIso))} | ${plural(days, "day").toUpperCase()} | ${esc(plural(counts.total, "entry", "entries").toUpperCase())}</span>
-          <span class="right">${esc(active ? "NOW" : statusLabel(trip))}</span>
+          <span class="right">${esc(active ? "NOW" : statusLabel(trip))}${activity ? ` | ${activity}` : ""}</span>
         </div>
         <h2 class="trip-title">${esc(trip.title)}</h2>
         <div class="trip-route">${esc(routeLabel(trip))}</div>
         ${sharedBy ? `<div class="trip-shared-by">${esc(sharedBy)}</div>` : ""}
+        ${participants ? `<div class="trip-participants">${esc(participants)}</div>` : ""}
       </article>
     `;
   }).join("");
@@ -1073,12 +1126,30 @@ function formatActivityTime(iso) {
   return `${formatDate(date.toISOString().slice(0, 10))} | ${formatTime(date.toISOString())}`;
 }
 
-function activityItems() {
+function activityItems(tripId = "") {
+  const filterTripId = String(tripId || "").trim();
   const entriesById = new Map(visibleEntries(state.entries).map(entry => [entry.id, entry]));
   const tripsById = new Map(visibleTrips(state.trips).map(trip => [trip.id, trip]));
   const items = [];
 
+  for (const entry of visibleEntries(state.entries)) {
+    if (filterTripId && entry.tripId !== filterTripId) continue;
+    const trip = tripsById.get(entry.tripId);
+    if (!trip) continue;
+    items.push({
+      id: entry.id,
+      type: "entry",
+      dateCreated: entry.dateCreated || entry.timestamp,
+      authorName: entry.authorName,
+      authorProfileId: entry.authorProfileId,
+      body: entry.title || firstLine(entryDescription(entry)),
+      entry,
+      trip
+    });
+  }
+
   for (const comment of visibleComments(state.comments)) {
+    if (filterTripId && comment.tripId !== filterTripId) continue;
     const entry = entriesById.get(comment.entryId);
     const trip = tripsById.get(comment.tripId);
     if (!entry || !trip) continue;
@@ -1097,11 +1168,37 @@ function activityItems() {
   return items.sort((left, right) => new Date(right.dateCreated) - new Date(left.dateCreated));
 }
 
-function unseenActivityCount() {
-  const seenAt = Date.parse(state.activitySeenAt || "") || 0;
-  const profileId = String(state.profile?.id || "").trim();
-  return activityItems().filter(item => {
-    if (profileId && item.authorProfileId === profileId) return false;
+function entryActivityPhrase(entry) {
+  const title = firstLine(entry?.title || "");
+  const description = firstLine(entryDescription(entry));
+  if (title) return `posted ${title}`;
+  if (description) return `posted ${description}`;
+  if (entryHasPhoto(entry) && !entry?.url) return "posted a photo";
+  if (entry?.url) return `posted ${entryUrlLabel(entry.url)}`;
+  if (entryHasPhoto(entry)) return "posted a photo";
+  return "posted an entry";
+}
+
+function activityLineParts(item) {
+  return {
+    time: formatActivityTime(item.dateCreated),
+    author: item.authorName || "Someone",
+    action: item.type === "entry"
+      ? entryActivityPhrase(item.entry)
+      : `commented ${firstLine(item.body) || "on an entry"}`
+  };
+}
+
+function tripSeenAt(tripId) {
+  return state.tripActivitySeenAt?.[tripId] || state.activitySeenAt || "";
+}
+
+function unseenActivityCount(tripId) {
+  const id = String(tripId || "").trim();
+  if (!id) return 0;
+  const seenAt = Date.parse(tripSeenAt(id)) || 0;
+  return activityItems(id).filter(item => {
+    if (isCurrentProfile(item.authorProfileId, item.authorName)) return false;
     return (Date.parse(item.dateCreated || "") || 0) > seenAt;
   }).length;
 }
@@ -1111,17 +1208,18 @@ function renderActivityIndicator() {
   const badge = $("activity-badge");
   if (!button || !badge) return;
 
-  const count = unseenActivityCount();
-  badge.hidden = !count;
-  badge.textContent = count > 99 ? "99+" : String(count);
-  button.title = count ? `${plural(count, "new item")} of activity` : "activity";
+  button.hidden = true;
+  badge.hidden = true;
+  badge.textContent = "";
+  button.title = "";
 }
 
-function markActivitySeen() {
+function markActivitySeen(tripId) {
   const profileId = String(state.profile?.id || "").trim();
-  if (!profileId) return;
+  const id = String(tripId || "").trim();
+  if (!profileId || !id) return;
   const seenAt = new Date().toISOString();
-  queueLocalMutation("profileState", profileId, "activitySeenAt", seenAt);
+  queueLocalMutation("profileState", profileId, tripActivitySeenField(id), seenAt);
   saveAndFlushSync();
 }
 
@@ -1129,29 +1227,52 @@ function renderActivityScreen() {
   const body = $("activity-body");
   if (!body) return;
 
-  const items = activityItems();
+  const trip = getTrip(state.activityTripId);
+  const items = activityItems(state.activityTripId);
   body.innerHTML = `
     <button class="back-btn" data-action="activity-back" type="button">BACK</button>
     <h2 class="screen-title">Activity</h2>
+    ${trip ? `<div class="trip-route" style="margin-bottom:20px;">${esc(trip.title)}</div>` : ""}
     ${items.length ? `
       <div class="activity-list">
         ${items.map(renderActivityItem).join("")}
       </div>
-    ` : '<div class="empty-state">no comments yet.</div>'}
+    ` : '<div class="empty-state">no activity yet.</div>'}
   `;
 }
 
 function renderActivityItem(item) {
-  const author = item.authorName || "Someone";
-  const entryLabel = item.entry.title || firstLine(entryDescription(item.entry)) || "entry";
-  const time = formatActivityTime(item.dateCreated);
-  const body = firstLine(item.body);
-
+  const parts = activityLineParts(item);
   return `
     <button class="activity-item" data-action="open-activity-entry" data-entry-id="${esc(item.entry.id)}" type="button">
-      <span class="activity-meta">${esc(`${author} commented`)}${time ? ` | ${esc(time)}` : ""}</span>
-      <span class="activity-title">${esc(item.trip.title)} | ${esc(entryLabel)}</span>
-      ${body ? `<span class="activity-text">${esc(body)}</span>` : ""}
+      <span class="activity-line">
+        <span class="activity-line-stamp">${esc(parts.time)}</span>
+        <span class="activity-line-author">${esc(parts.author)}</span>
+        <span class="activity-line-action">${esc(parts.action)}</span>
+      </span>
+    </button>
+  `;
+}
+
+function activityCountText(count) {
+  return count > 99 ? "99+" : String(count);
+}
+
+function renderTripCardActivity(trip) {
+  const count = unseenActivityCount(trip.id);
+  if (!count) return "";
+  return `
+    <button class="action-link activity-link trip-card-activity" data-action="open-trip-activity" data-trip-id="${esc(trip.id)}" type="button" aria-label="${esc(plural(count, "new activity item"))}">
+      <span class="activity-badge">${esc(activityCountText(count))}</span>
+    </button>
+  `;
+}
+
+function renderTripActivityButton(trip) {
+  const count = unseenActivityCount(trip.id);
+  return `
+    <button class="action-link activity-link title-action trip-activity-link" data-action="open-trip-activity" data-trip-id="${esc(trip.id)}" type="button" aria-label="${esc(count ? plural(count, "new activity item") : "activity")}">
+      <span class="activity-badge">${esc(activityCountText(count))}</span>
     </button>
   `;
 }
@@ -1160,9 +1281,13 @@ function firstLine(value) {
   return String(value || "").split("\n").map(part => part.trim()).filter(Boolean)[0] || "";
 }
 
-function openActivityScreen() {
-  markActivitySeen();
+function openActivityScreen(options = {}) {
+  const tripId = String(options.tripId || state.activityTripId || state.currentTripId || "").trim();
+  state.activityTripId = tripId;
+  if (options.markSeen !== false) markActivitySeen(tripId);
   renderActivityIndicator();
+  renderList();
+  if ($("trip-overlay").classList.contains("active") && state.currentTripId) renderTrip();
   renderActivityScreen();
   openOverlay("activity-overlay");
   requestAnimationFrame(() => $("activity-body")?.focus());
@@ -1179,9 +1304,8 @@ function openActivityEntry(entryId) {
     return;
   }
 
-  closeActivityScreen();
-  showTrip(entry.tripId);
-  openEntry(entry.id);
+  state.currentTripId = entry.tripId;
+  openEntry(entry.id, { returnTo: "activity" });
 }
 
 function renderAll() {
@@ -1290,6 +1414,7 @@ async function saveSetupName() {
   saveAndFlushSync();
   closeSetupScreen();
   renderAll();
+  savePendingComment();
   handleIncomingQueries();
 
   if (state.profile?.code) {
@@ -1369,6 +1494,26 @@ function seedProfileQueueFromTrip(tripId) {
   }
 }
 
+function currentCollaboratorRecord() {
+  return {
+    profileId: state.profile?.id || "",
+    name: state.profile?.name || "",
+    joinedAt: new Date().toISOString()
+  };
+}
+
+function ensureCurrentCollaborator(trip, options = {}) {
+  if (!trip || !hasProfileName() || isTripOwner(trip) || isTripCollaborator(trip)) return false;
+  const collaborators = [
+    ...tripCollaborators(trip),
+    currentCollaboratorRecord()
+  ];
+  queueLocalMutation("trip", trip.id, "collaborators", collaborators, {
+    skipWritableCheck: Boolean(options.skipWritableCheck)
+  });
+  return true;
+}
+
 async function ensureProfileCode() {
   if (!state.settings.syncBaseUrl) throw new Error("Linking is not available here yet.");
   if (state.profile?.code) return state.profile.code;
@@ -1419,6 +1564,7 @@ async function ensureTripShared(trip) {
   if (!hasProfileName()) throw new Error("Set your name first.");
   if (!trip) throw new Error("Trip not found.");
   assertTripWritable(trip);
+  if (!isTripOwner(trip)) throw new Error("Only the trip owner can create links.");
   if (trip.sharedCode) {
     sharedSyncState(trip.sharedCode, trip.id);
     return trip.sharedCode;
@@ -1438,11 +1584,11 @@ async function ensureTripShared(trip) {
   return payload.code;
 }
 
-async function importSharedTrip(code) {
+async function importSharedTrip(code, options = {}) {
   const normalized = normalizeCode(code);
   if (!normalized) throw new Error("Share link is invalid.");
   if (!state.settings.syncBaseUrl) throw new Error("Sharing is not available here yet.");
-  if (!hasProfileName()) {
+  if (options.collaborator && !hasProfileName()) {
     state.pendingTripCode = normalized;
     openSetupScreen();
     return;
@@ -1454,6 +1600,10 @@ async function importSharedTrip(code) {
 
   const trip = visibleTrips(state.trips).find(candidate => candidate.sharedCode === normalized || candidate.id === payload?.trip?.id);
   if (!trip) throw new Error("Shared trip not found.");
+
+  if (options.collaborator) {
+    ensureCurrentCollaborator(trip, { skipWritableCheck: true });
+  }
 
   if (!existing) {
     seedProfileQueueFromTrip(trip.id);
@@ -1484,6 +1634,15 @@ function tripShareUrl(code) {
   url.search = "";
   url.hash = "";
   url.searchParams.set("trip", normalizeCode(code));
+  return url.toString();
+}
+
+function tripCollabUrl(code) {
+  if (!state.settings.syncBaseUrl) return "";
+  const url = new URL(globalThis.location.href);
+  url.search = "";
+  url.hash = "";
+  url.searchParams.set("collab", normalizeCode(code));
   return url.toString();
 }
 
@@ -1588,12 +1747,13 @@ function closeLinkScreen() {
 function renderShareScreen() {
   const trip = getTrip(state.shareTripId);
   if (!trip) return;
-  const shareUrl = trip.sharedCode ? tripShareUrl(trip.sharedCode) : "";
+  const viewerUrl = trip.sharedCode ? tripShareUrl(trip.sharedCode) : "";
+  const collaboratorUrl = trip.sharedCode ? tripCollabUrl(trip.sharedCode) : "";
   const helper = state.shareBusy
-    ? "Preparing share link..."
-    : shareUrl || (
+    ? "Preparing links..."
+    : (
       state.settings.syncBaseUrl
-        ? "Open SHARE to create a trip link."
+        ? "Links will appear here."
         : "Sharing is not available here yet."
     );
 
@@ -1603,19 +1763,30 @@ function renderShareScreen() {
     <div class="trip-route" style="margin-bottom:20px;">${esc(trip.title)}</div>
 
     <div class="field">
-      <span class="field-label">Link</span>
-      <span class="field-helper break-anywhere">${esc(helper)}</span>
+      <span class="field-label">Viewer link</span>
+      <span class="field-helper">People with this link can read and comment. They cannot add or edit entries.</span>
+      <span class="field-helper break-anywhere">${esc(viewerUrl || helper)}</span>
+      ${viewerUrl ? `
+        <div class="action-row share-link-actions">
+          <button class="action-link" data-action="copy-share-link" data-share-kind="viewer" type="button">COPY VIEWER LINK</button>
+        </div>
+      ` : ""}
+    </div>
+
+    <div class="field">
+      <span class="field-label">Collaborator link</span>
+      <span class="field-helper">People with this link can add entries to this trip.</span>
+      <span class="field-helper break-anywhere">${esc(collaboratorUrl || helper)}</span>
+      ${collaboratorUrl ? `
+        <div class="action-row share-link-actions">
+          <button class="action-link" data-action="copy-share-link" data-share-kind="collaborator" type="button">COPY COLLABORATOR LINK</button>
+        </div>
+      ` : ""}
     </div>
 
     ${state.shareError ? `
       <div class="field">
         <span class="field-helper accent">${esc(state.shareError)}</span>
-      </div>
-    ` : ""}
-
-    ${shareUrl ? `
-      <div class="action-row">
-        <button class="action-link" data-action="copy-share-link" type="button">COPY</button>
       </div>
     ` : ""}
   `;
@@ -1663,8 +1834,9 @@ function stripLinkQuery() {
 
 function stripTripQuery() {
   const url = new URL(globalThis.location.href);
-  if (!url.searchParams.has("trip")) return;
+  if (!url.searchParams.has("trip") && !url.searchParams.has("collab")) return;
   url.searchParams.delete("trip");
+  url.searchParams.delete("collab");
   globalThis.history?.replaceState?.({}, "", url);
 }
 
@@ -1690,27 +1862,42 @@ function handleLinkQuery() {
 
 function handleTripQuery() {
   const params = new URLSearchParams(globalThis.location.search);
-  const code = normalizeCode(params.get("trip"));
+  const collabCode = normalizeCode(params.get("collab"));
+  const code = collabCode || normalizeCode(params.get("trip"));
   if (!code) return;
+
+  if (collabCode && !hasProfileName()) {
+    state.pendingTripCode = collabCode;
+    openSetupScreen();
+    return;
+  }
 
   const existing = visibleTrips(state.trips).find(trip => trip.sharedCode === code);
   if (existing) {
+    if (collabCode) {
+      ensureCurrentCollaborator(existing, { skipWritableCheck: true });
+      saveAndFlushSync();
+    }
     stripTripQuery();
     showTrip(existing.id);
     return;
   }
 
-  runAction(() => importSharedTrip(code));
+  runAction(() => importSharedTrip(code, { collaborator: Boolean(collabCode) }));
 }
 
 function handleIncomingQueries() {
-  if (!hasProfileName()) {
-    openSetupScreen();
-    return;
-  }
+  const params = new URLSearchParams(globalThis.location.search);
+  const hasIncomingLink = Boolean(normalizeCode(params.get("link")));
+  const hasViewerTrip = Boolean(normalizeCode(params.get("trip"))) && !normalizeCode(params.get("collab"));
+  const hasCollaboratorTrip = Boolean(normalizeCode(params.get("collab")));
 
   handleLinkQuery();
   handleTripQuery();
+
+  if (!hasProfileName() && !hasIncomingLink && !hasViewerTrip && !hasCollaboratorTrip) {
+    openSetupScreen();
+  }
 }
 
 async function copyDeviceLink() {
@@ -1720,9 +1907,11 @@ async function copyDeviceLink() {
   toast("Link copied");
 }
 
-async function copyShareLink() {
+async function copyShareLink(kind = "viewer") {
   const trip = getTrip(state.shareTripId);
-  const url = trip?.sharedCode ? tripShareUrl(trip.sharedCode) : "";
+  const url = trip?.sharedCode
+    ? (kind === "collaborator" ? tripCollabUrl(trip.sharedCode) : tripShareUrl(trip.sharedCode))
+    : "";
   if (!url) throw new Error("Share link is not ready yet.");
   await navigator.clipboard.writeText(url);
   toast("Link copied");
@@ -1752,13 +1941,13 @@ function renderTrip() {
   const counts = tripEntryCounts(state.entries, trip.id);
   const sharedBy = tripSharedByLabel(trip);
   const readOnly = isReadOnlyTrip(trip);
-  const tripActions = readOnly
-    ? ""
-    : `
-        <button class="action-link title-action" data-action="compose-journal" type="button">+ ADD</button>
-        <button class="action-link title-action" data-action="share-trip" type="button">SHARE</button>
-        <button class="action-link title-action" data-action="edit-trip" type="button">EDIT</button>
-      `;
+  const owner = isTripOwner(trip);
+  const tripActions = [
+    renderTripActivityButton(trip),
+    readOnly ? "" : '<button class="action-link title-action" data-action="compose-journal" type="button">+ ADD</button>',
+    !readOnly && owner ? '<button class="action-link title-action" data-action="share-trip" type="button">SHARE</button>' : "",
+    !readOnly && owner ? '<button class="action-link title-action" data-action="edit-trip" type="button">EDIT</button>' : ""
+  ].filter(Boolean).join("");
 
   $("trip-body").innerHTML = `
     <div class="map-panel"><div class="map-canvas" id="trip-map"></div></div>
@@ -1772,6 +1961,7 @@ function renderTrip() {
       ${tripActions ? `<div class="trip-head-actions">${tripActions}</div>` : ""}
     </div>
     ${sharedBy ? `<div class="trip-shared-by">${esc(sharedBy)}</div>` : ""}
+    ${renderTripParticipants(trip)}
 
     <div id="timeline">${entries.length ? renderTimeline(entries) : '<div class="empty-state">no entries yet.</div>'}</div>
   `;
@@ -1902,8 +2092,9 @@ function renderEntrySocial(entry) {
 function renderComment(comment) {
   const meta = [comment.authorName || "Someone", formatActivityTime(comment.dateCreated)].filter(Boolean).join(" | ");
   const editing = state.editingCommentId === comment.id;
+  const selected = state.selectedCommentId === comment.id;
   return `
-    <article class="comment">
+    <article class="comment ${selected ? "selected" : ""}" data-comment-id="${esc(comment.id)}">
       <div class="comment-meta">${esc(meta)}</div>
       ${editing ? `
         <input class="field-input comment-edit-input" data-comment-id="${esc(comment.id)}" value="${esc(state.commentEditDraft)}" autocomplete="off">
@@ -1913,7 +2104,7 @@ function renderComment(comment) {
         </div>
       ` : `
         <div class="comment-body">${bodyParagraphs(comment.body)}</div>
-        ${renderCommentActions(comment)}
+        ${selected ? renderCommentActions(comment) : ""}
       `}
     </article>
   `;
@@ -1930,23 +2121,31 @@ function renderCommentActions(comment) {
   return actions.length ? `<div class="comment-actions">${actions.join("")}</div>` : "";
 }
 
-function openEntry(entryId) {
+function openEntry(entryId, options = {}) {
   const entry = getEntry(entryId);
   if (!entry) return;
   if (state.currentEntryId !== entry.id) state.commentDraft = "";
   state.currentEntryId = entry.id;
+  state.entryReturnTo = options.returnTo || "";
   renderEntry();
   openOverlay("entry-overlay");
 }
 
 function closeEntry() {
+  const returnTo = state.entryReturnTo;
   entryMap = destroyMap(entryMap);
   closeOverlay("entry-overlay");
   state.currentEntryId = null;
+  state.entryReturnTo = "";
   state.commentDraft = "";
   state.editingCommentId = "";
   state.commentEditDraft = "";
   clearConfirmation("entry");
+
+  if (returnTo === "activity" && $("activity-overlay").classList.contains("active")) {
+    renderActivityScreen();
+    requestAnimationFrame(() => $("activity-body")?.focus());
+  }
 }
 
 function renderEntry() {
@@ -1955,7 +2154,7 @@ function renderEntry() {
   const trip = getTrip(entry.tripId);
   const includeAuthor = showEntryAuthors(entry.tripId);
   const readOnly = isReadOnlyTrip(trip);
-  const actions = readOnly
+  const actions = readOnly || !canManageEntry(entry)
     ? ""
     : `
       <hr class="detail-rule">
@@ -2007,23 +2206,46 @@ function saveInlineCommentFromForm(entryId) {
 }
 
 function saveCommentForEntry(entry, body, onSaved) {
-  if (!hasProfileName()) {
-    openSetupScreen();
-    return;
-  }
-
-  if (!body) {
+  const text = String(body || "").trim();
+  if (!text) {
     toast("comment required");
     return;
   }
 
+  if (!hasProfileName()) {
+    state.pendingComment = { entryId: entry.id, body: text };
+    openSetupScreen();
+    return;
+  }
+
+  onSaved?.();
+  createCommentForEntry(entry, text);
+}
+
+function createCommentForEntry(entry, body) {
   const comment = createComment(entry, state.profile, body);
   queueEntityCreate("comment", comment);
-  onSaved?.();
+  state.selectedCommentId = comment.id;
   saveAndFlushSync();
   renderAll();
   renderCommentSurfaces();
   toast("comment added");
+}
+
+function savePendingComment() {
+  if (!state.pendingComment || !hasProfileName()) return false;
+  const pending = state.pendingComment;
+  state.pendingComment = null;
+
+  const entry = getEntry(pending.entryId);
+  const body = String(pending.body || "").trim();
+  if (!entry || !body) return false;
+
+  state.commentDraft = "";
+  state.inlineCommentDrafts.delete(entry.id);
+  state.expandedCommentEntryIds.add(entry.id);
+  createCommentForEntry(entry, body);
+  return true;
 }
 
 function renderCommentSurfaces() {
@@ -2038,6 +2260,21 @@ function renderCommentSurfaces() {
   }
 }
 
+function selectComment(commentId) {
+  const comment = getComment(commentId);
+  if (!comment || state.selectedCommentId === comment.id) return;
+  state.selectedCommentId = comment.id;
+  renderCommentSurfaces();
+}
+
+function maybeSelectCommentFromEvent(event) {
+  if (event.target.closest("a, button, input, textarea, select")) return false;
+  const comment = event.target.closest(".comment");
+  if (!comment) return false;
+  selectComment(comment.dataset.commentId);
+  return true;
+}
+
 function startEditComment(commentId) {
   const comment = getComment(commentId);
   if (!comment) return;
@@ -2046,6 +2283,7 @@ function startEditComment(commentId) {
     return;
   }
 
+  state.selectedCommentId = comment.id;
   state.editingCommentId = comment.id;
   state.commentEditDraft = comment.body;
   clearConfirmation("comment");
@@ -2110,6 +2348,9 @@ function deleteComment(commentId) {
     state.editingCommentId = "";
     state.commentEditDraft = "";
   }
+  if (state.selectedCommentId === comment.id) {
+    state.selectedCommentId = "";
+  }
   saveAndFlushSync();
   renderAll();
   renderCommentSurfaces();
@@ -2121,6 +2362,7 @@ function openCompose(entryId = "") {
   if (!trip) return;
   assertTripWritable(trip);
   const entry = entryId ? getEntry(entryId) : null;
+  if (entry && !canManageEntry(entry)) throw new Error("You cannot edit this entry.");
   state.composeEntryId = entryId;
   state.isChangingEntryLocation = false;
   state.entryLocationDraft = null;
@@ -2484,6 +2726,7 @@ async function saveEntryFromForm() {
   if (state.composeEntryId) {
     const index = state.entries.findIndex(entry => entry.id === state.composeEntryId);
     if (index < 0) return;
+    if (!canManageEntry(state.entries[index])) throw new Error("You cannot edit this entry.");
     const nextEntry = normalizeEntry({
       ...state.entries[index],
       ...fields
@@ -2523,6 +2766,7 @@ function deleteCurrentEntry() {
   const entry = getEntry(state.currentEntryId);
   if (!entry) return;
   assertTripWritable(getTrip(entry.tripId));
+  if (!canManageEntry(entry)) throw new Error("You cannot delete this entry.");
 
   queueLocalMutation("entry", entry.id, "_delete", true);
 
@@ -2538,6 +2782,7 @@ function openTripForm() {
   const trip = getTrip(state.currentTripId);
   if (!trip) return;
   assertTripWritable(trip);
+  if (!isTripOwner(trip)) throw new Error("Only the trip owner can edit trip details.");
   state.editingTripId = trip.id;
   renderTripForm();
   openOverlay("trip-form-overlay");
@@ -2588,6 +2833,7 @@ function saveTripFromForm() {
   const trip = getTrip(state.editingTripId);
   if (!trip) return;
   assertTripWritable(trip);
+  if (!isTripOwner(trip)) throw new Error("Only the trip owner can edit trip details.");
 
   const title = $("trip-title-input")?.value.trim() || "";
   if (!title) {
@@ -2619,6 +2865,7 @@ function deleteCurrentTrip() {
   const trip = getTrip(state.editingTripId);
   if (!trip) return;
   assertTripWritable(trip);
+  if (!isTripOwner(trip)) throw new Error("Only the trip owner can delete this trip.");
 
   for (const entry of entriesForTrip(state.entries, trip.id)) {
     queueLocalMutation("entry", entry.id, "_delete", true);
@@ -2658,8 +2905,16 @@ function createTripFromInput(value) {
 
 function openOverlay(id) {
   const overlay = $(id);
+  if (overlay.classList.contains("active")) {
+    overlay.style.zIndex = String(++overlayZIndex);
+    syncBodyScroll();
+    return;
+  }
+
   const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
   overlayFocusStack.push({ id, previousFocus });
+  overlay.dataset.closeToken = "";
+  overlay.style.zIndex = String(++overlayZIndex);
   overlay.inert = false;
   overlay.classList.add("active");
   overlay.setAttribute("aria-hidden", "false");
@@ -2674,6 +2929,14 @@ function closeOverlay(id) {
   overlay.classList.remove("active");
   overlay.setAttribute("aria-hidden", "true");
   overlay.inert = true;
+  const closeToken = createId("close");
+  overlay.dataset.closeToken = closeToken;
+  setTimeout(() => {
+    if (!overlay.classList.contains("active") && overlay.dataset.closeToken === closeToken) {
+      overlay.style.zIndex = "";
+      overlay.dataset.closeToken = "";
+    }
+  }, 360);
   syncBodyScroll();
 }
 
@@ -2747,13 +3010,25 @@ function syncBodyScroll() {
 
 function closeTopOverlay() {
   if ($("setup-overlay").classList.contains("active")) return;
-  if ($("activity-overlay").classList.contains("active")) return closeActivityScreen();
-  if ($("share-overlay").classList.contains("active")) return closeShareScreen();
-  if ($("link-overlay").classList.contains("active")) return closeLinkScreen();
-  if ($("trip-form-overlay").classList.contains("active")) return closeTripForm();
-  if ($("compose-overlay").classList.contains("active")) return requestCloseCompose();
-  if ($("entry-overlay").classList.contains("active")) return closeEntry();
-  if ($("trip-overlay").classList.contains("active")) return closeTrip();
+  const top = topActiveOverlay();
+  if (!top) return;
+  if (top.id === "activity-overlay") return closeActivityScreen();
+  if (top.id === "share-overlay") return closeShareScreen();
+  if (top.id === "link-overlay") return closeLinkScreen();
+  if (top.id === "trip-form-overlay") return closeTripForm();
+  if (top.id === "compose-overlay") return requestCloseCompose();
+  if (top.id === "entry-overlay") return closeEntry();
+  if (top.id === "trip-overlay") return closeTrip();
+}
+
+function topActiveOverlay() {
+  return Array.from(document.querySelectorAll(".overlay.active"))
+    .sort((left, right) => numericZIndex(right) - numericZIndex(left))[0] || null;
+}
+
+function numericZIndex(element) {
+  const value = Number.parseInt(getComputedStyle(element).zIndex, 10);
+  return Number.isFinite(value) ? value : 0;
 }
 
 function handleConfirmationAction(confirmed) {
@@ -2966,6 +3241,13 @@ function bindEvents() {
   });
 
   $("trip-list").addEventListener("click", event => {
+    const action = event.target.closest("[data-action]");
+    if (action?.dataset.action === "open-trip-activity") {
+      event.preventDefault();
+      event.stopPropagation();
+      return openActivityScreen({ tripId: action.dataset.tripId });
+    }
+
     const item = event.target.closest(".trip-item");
     if (item) showTrip(item.dataset.tripId);
   });
@@ -2982,6 +3264,7 @@ function bindEvents() {
     const action = event.target.closest("[data-action]");
     if (action) {
       if (action.dataset.action === "trip-back") return closeTrip();
+      if (action.dataset.action === "open-trip-activity") return openActivityScreen({ tripId: action.dataset.tripId || state.currentTripId });
       if (action.dataset.action === "compose-journal") return runAction(() => openCompose());
       if (action.dataset.action === "share-trip") return runAction(() => openShareScreen(state.currentTripId));
       if (action.dataset.action === "edit-trip") return runAction(() => openTripForm());
@@ -2992,13 +3275,18 @@ function bindEvents() {
       if (action.dataset.action === "delete-comment") return requestDeleteComment(action.dataset.commentId);
     }
 
+    if (maybeSelectCommentFromEvent(event)) return;
+
     const entry = event.target.closest(".entry");
     if (entry && !event.target.closest("a, button, input, textarea, .comment")) openEntry(entry.dataset.entryId);
   });
 
   $("entry-overlay").addEventListener("click", event => {
     const action = event.target.closest("[data-action]");
-    if (!action) return;
+    if (!action) {
+      maybeSelectCommentFromEvent(event);
+      return;
+    }
     if (action.dataset.action === "entry-back") return closeEntry();
     if (action.dataset.action === "edit-entry") {
       const entry = getEntry(state.currentEntryId);
@@ -3162,7 +3450,7 @@ function bindEvents() {
     const action = event.target.closest("[data-action]");
     if (!action) return;
     if (action.dataset.action === "share-back") return closeShareScreen();
-    if (action.dataset.action === "copy-share-link") return runAction(copyShareLink);
+    if (action.dataset.action === "copy-share-link") return runAction(() => copyShareLink(action.dataset.shareKind));
   });
 
   $("activity-overlay").addEventListener("click", event => {

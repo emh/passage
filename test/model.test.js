@@ -6,6 +6,8 @@ import {
   createComment,
   isTripSharedByOtherProfile,
   normalizeEntry,
+  normalizeTrip,
+  tripActivitySeenField,
   visibleComments
 } from "../app/model.js";
 import { createInitialState } from "../app/storage.js";
@@ -129,6 +131,21 @@ test("profile state mutations update activity seen timestamp", () => {
   assert.equal(state.activitySeenAt, "2026-04-21T12:00:00.000Z");
 });
 
+test("profile state mutations update per-trip activity seen timestamps", () => {
+  const state = createInitialState();
+
+  applyMutation(state, {
+    id: "m-trip-profile-state",
+    entityType: "profileState",
+    entityId: state.profile.id,
+    field: tripActivitySeenField("trip-1"),
+    value: "2026-04-21T13:00:00.000Z",
+    timestamp: "0000000000100:0000:device-a"
+  });
+
+  assert.equal(state.tripActivitySeenAt["trip-1"], "2026-04-21T13:00:00.000Z");
+});
+
 test("entries keep legacy body text as description and normalize photo metadata", () => {
   const entry = normalizeEntry({
     id: "entry-1",
@@ -148,6 +165,26 @@ test("entries keep legacy body text as description and normalize photo metadata"
   assert.equal(entry.url, "https://example.com/path");
   assert.equal(entry.photoAssetId, "photo-1");
   assert.equal(entry.photoWidth, 1600);
+});
+
+test("trips normalize collaborator records", () => {
+  const trip = normalizeTrip({
+    id: "trip-1",
+    title: "Road trip",
+    collaborators: [
+      { profileId: "profile-2", name: " Avery ", joinedAt: "2026-04-21T12:00:00.000Z" },
+      { profileId: "profile-2", name: "Duplicate" },
+      { name: "No ID" }
+    ]
+  });
+
+  assert.equal(trip.collaborators.length, 2);
+  assert.deepEqual(trip.collaborators[0], {
+    profileId: "profile-2",
+    name: "Avery",
+    joinedAt: "2026-04-21T12:00:00.000Z"
+  });
+  assert.equal(trip.collaborators[1].name, "No ID");
 });
 
 test("shared trip ownership identifies trips owned by another profile", () => {

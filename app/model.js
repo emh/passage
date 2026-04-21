@@ -4,6 +4,7 @@ export const TRIP_FIELDS = [
   "endIso",
   "cities",
   "sharedCode",
+  "collaborators",
   "ownerProfileId",
   "ownerName",
   "dateCreated",
@@ -57,7 +58,18 @@ export const PROFILE_STATE_FIELDS = [
   "activitySeenAt"
 ];
 
+const TRIP_ACTIVITY_SEEN_PREFIX = "tripActivitySeenAt:";
+
 export const ENTITY_TYPES = ["trip", "entry", "comment", "profileState"];
+
+export function tripActivitySeenField(tripId) {
+  const id = String(tripId || "").trim();
+  return id ? `${TRIP_ACTIVITY_SEEN_PREFIX}${id}` : "";
+}
+
+export function isProfileStateField(field) {
+  return PROFILE_STATE_FIELDS.includes(field) || Boolean(tripIdFromActivitySeenField(field));
+}
 
 export function createId(prefix = "id") {
   if (globalThis.crypto?.randomUUID) return `${prefix}-${globalThis.crypto.randomUUID()}`;
@@ -181,6 +193,7 @@ export function normalizeTrip(input = {}) {
     endIso: normalizedEnd,
     cities: normalizeCities(input.cities),
     sharedCode: normalizeCode(input.sharedCode),
+    collaborators: normalizeCollaborators(input.collaborators),
     ownerProfileId: String(input.ownerProfileId || "").trim(),
     ownerName: normalizeUserName(input.ownerName),
     dateCreated: typeof input.dateCreated === "string" && input.dateCreated ? input.dateCreated : now,
@@ -527,9 +540,16 @@ function applyProfileStateMutation(state, mutation) {
   state.profileStateClocks[mutation.entityId] ||= {};
   const clocks = state.profileStateClocks[mutation.entityId];
   const field = mutation.field;
-  if (!PROFILE_STATE_FIELDS.includes(field)) return false;
+  if (!isProfileStateField(field)) return false;
   if (!shouldApply(clocks[field], mutation.timestamp)) return false;
-  state[field] = coerceProfileStateField(field, mutation.value);
+
+  const tripId = tripIdFromActivitySeenField(field);
+  if (tripId) {
+    state.tripActivitySeenAt ||= {};
+    state.tripActivitySeenAt[tripId] = coerceProfileStateField("activitySeenAt", mutation.value);
+  } else {
+    state[field] = coerceProfileStateField(field, mutation.value);
+  }
   clocks[field] = mutation.timestamp;
   return true;
 }
@@ -539,6 +559,33 @@ function normalizeCities(value) {
   return Array.from(new Set(raw
     .map(city => cleanSingleLine(city))
     .filter(Boolean)));
+}
+
+function normalizeCollaborators(value) {
+  const list = Array.isArray(value) ? value : [];
+  const seen = new Set();
+  const result = [];
+
+  for (const item of list) {
+    const profileId = String(item?.profileId || item?.id || "").trim();
+    const name = normalizeUserName(item?.name);
+    const key = profileId || name.toLowerCase();
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    result.push({
+      profileId,
+      name,
+      joinedAt: validDateTime(item?.joinedAt) || ""
+    });
+  }
+
+  return result;
+}
+
+function tripIdFromActivitySeenField(field) {
+  const value = String(field || "");
+  if (!value.startsWith(TRIP_ACTIVITY_SEEN_PREFIX)) return "";
+  return value.slice(TRIP_ACTIVITY_SEEN_PREFIX.length).trim();
 }
 
 function validDateOnly(value) {
@@ -595,6 +642,7 @@ function normalizePhotoMime(value) {
 function coerceTripField(field, value) {
   if (field === "deleted") return Boolean(value);
   if (field === "cities") return normalizeCities(value);
+  if (field === "collaborators") return normalizeCollaborators(value);
   if (field === "startIso" || field === "endIso") return validDateOnly(value) || todayIso();
   if (field === "sharedCode") return normalizeCode(value);
   if (field === "ownerProfileId") return String(value || "").trim();
