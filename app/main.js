@@ -73,6 +73,8 @@ const state = {
   entryPhotoDraft: null,
   entryPhotoRemoved: false,
   entryPhotoError: "",
+  composeInitialSnapshot: null,
+  composeDiscardConfirm: false,
   geolocationStatus: "checking",
   geolocationMessage: "checking location...",
   lastPosition: null
@@ -1462,7 +1464,7 @@ function renderTrip() {
   const tripActions = readOnly
     ? ""
     : `
-        <button class="action-link title-action" data-action="compose-journal" type="button">+ ENTRY</button>
+        <button class="action-link title-action" data-action="compose-journal" type="button">+ ADD</button>
         <button class="action-link title-action" data-action="share-trip" type="button">SHARE</button>
         <button class="action-link title-action" data-action="edit-trip" type="button">EDIT</button>
       `;
@@ -1614,6 +1616,7 @@ function openCompose(entryId = "") {
   const trip = getTrip(state.currentTripId);
   if (!trip) return;
   assertTripWritable(trip);
+  const entry = entryId ? getEntry(entryId) : null;
   state.composeEntryId = entryId;
   state.isChangingEntryLocation = false;
   state.entryLocationDraft = null;
@@ -1623,9 +1626,22 @@ function openCompose(entryId = "") {
   state.entryPhotoDraft = null;
   state.entryPhotoRemoved = false;
   state.entryPhotoError = "";
+  state.composeInitialSnapshot = composeSnapshotFromEntry(entry);
+  state.composeDiscardConfirm = false;
   renderCompose();
   openOverlay("compose-overlay");
   requestAnimationFrame(() => $("entry-description-input")?.focus());
+}
+
+function requestCloseCompose() {
+  if (hasUnsavedComposeChanges()) {
+    state.composeDiscardConfirm = true;
+    renderCompose();
+    requestAnimationFrame(() => $("compose-discard-no")?.focus());
+    return;
+  }
+
+  closeCompose();
 }
 
 function closeCompose() {
@@ -1640,6 +1656,8 @@ function closeCompose() {
   state.entryPhotoDraft = null;
   state.entryPhotoRemoved = false;
   state.entryPhotoError = "";
+  state.composeInitialSnapshot = null;
+  state.composeDiscardConfirm = false;
 }
 
 function captureEntryFormDraft() {
@@ -1662,6 +1680,67 @@ function entryFormValue(entry, field, fallback = "") {
     return state.entryFormDraft[field];
   }
   return fallback;
+}
+
+function composeSnapshotFromEntry(entry) {
+  const timestamp = entry?.timestamp || new Date().toISOString();
+  return {
+    title: String(entry?.title || "").trim(),
+    description: entryDescription(entry).trim(),
+    url: String(entry?.url || "").trim(),
+    timestampInput: toDateTimeInputValue(timestamp),
+    location: locationSignature(entry),
+    photoAssetId: entry?.photoAssetId || ""
+  };
+}
+
+function currentComposeSnapshot() {
+  captureEntryFormDraft();
+
+  const initial = state.composeInitialSnapshot || composeSnapshotFromEntry(null);
+  const title = String(state.entryFormDraft?.title || "").trim();
+  const description = String(state.entryFormDraft?.description || "").trim();
+  const url = String(state.entryFormDraft?.url || "").trim();
+  const timestampInput = String(state.entryFormDraft?.timestampInput || initial.timestampInput || "").trim();
+  const location = state.entryLocationDraft ? locationSignature(state.entryLocationDraft) : initial.location;
+  const photoAssetId = state.entryPhotoRemoved
+    ? ""
+    : state.entryPhotoDraft?.photoAssetId || initial.photoAssetId || "";
+
+  return {
+    title,
+    description,
+    url,
+    timestampInput,
+    location,
+    photoAssetId
+  };
+}
+
+function hasUnsavedComposeChanges() {
+  const initial = state.composeInitialSnapshot;
+  if (!initial) return false;
+
+  const current = currentComposeSnapshot();
+  return current.title !== initial.title ||
+    current.description !== initial.description ||
+    current.url !== initial.url ||
+    current.timestampInput !== initial.timestampInput ||
+    current.location !== initial.location ||
+    current.photoAssetId !== initial.photoAssetId;
+}
+
+function locationSignature(location) {
+  if (!location) return "";
+  return JSON.stringify({
+    lat: Number.isFinite(location.lat) ? Number(location.lat).toFixed(6) : "",
+    lng: Number.isFinite(location.lng) ? Number(location.lng).toFixed(6) : "",
+    locationQuery: String(location.locationQuery || "").trim(),
+    locationDisplayName: String(location.locationDisplayName || "").trim(),
+    locationCity: String(location.locationCity || "").trim(),
+    locationRegion: String(location.locationRegion || "").trim(),
+    locationCountry: String(location.locationCountry || "").trim()
+  });
 }
 
 function renderLocationField(entry, label) {
@@ -1714,7 +1793,8 @@ function renderPhotoField(entry) {
         ${photo?.photoAssetId ? '<button class="inline-link" data-action="remove-entry-photo" type="button">REMOVE</button>' : ""}
       </div>
       ${url ? `<img class="photo-preview" src="${esc(url)}" alt="selected photo">` : photo?.photoAssetId ? `<div class="entry-photo-placeholder form">loading photo...</div>` : ""}
-      <input class="field-input file-input" id="entry-photo-input" type="file" accept="image/*">
+      <input class="file-input" id="entry-photo-input" type="file" accept="image/*">
+      <label class="action-link file-picker-link" for="entry-photo-input">${photo?.photoAssetId ? "CHANGE PHOTO" : "CHOOSE PHOTO"}</label>
       <span class="field-helper ${state.entryPhotoError ? "accent" : ""}">${esc(helper)}</span>
     </div>
   `;
@@ -1727,10 +1807,19 @@ function renderCompose() {
   const locationLabel = entry
     ? entryLocationLabel(entry)
     : currentPositionLabel();
+  const timestampFallback = state.composeInitialSnapshot?.timestampInput ||
+    toDateTimeInputValue(entry?.timestamp || new Date().toISOString());
 
   $("compose-body").innerHTML = `
     <div class="map-panel compact"><div class="map-canvas" id="compose-location-map"></div></div>
     <button class="back-btn" data-action="compose-back" type="button">BACK</button>
+    ${state.composeDiscardConfirm ? `
+      <div class="discard-confirm" role="status">
+        <span>Unsaved changes. Discard them?</span>
+        <button class="action-link destructive" data-action="confirm-discard-compose" type="button">YES</button>
+        <button class="action-link secondary" data-action="cancel-discard-compose" id="compose-discard-no" type="button">NO</button>
+      </div>
+    ` : ""}
     <h2 class="screen-title">${esc(title)}</h2>
     <div class="trip-route" style="margin-bottom:20px;">in <em>${esc(trip?.title || "")}</em></div>
 
@@ -1753,7 +1842,7 @@ function renderCompose() {
 
     <label class="field">
       <span class="field-label">When</span>
-      <input class="field-input" id="entry-time-input" type="datetime-local" value="${esc(entryFormValue(entry, "timestampInput", toDateTimeInputValue(entry?.timestamp || new Date().toISOString())))}">
+      <input class="field-input" id="entry-time-input" type="datetime-local" value="${esc(entryFormValue(entry, "timestampInput", timestampFallback))}">
     </label>
 
     ${renderLocationField(entry, locationLabel)}
@@ -1771,6 +1860,7 @@ async function geocodeEntryLocationFromForm() {
   captureEntryFormDraft();
   const input = $("location-query-input");
   const query = input?.value || "";
+  state.composeDiscardConfirm = false;
   state.entryLocationQuery = query;
   state.entryLocationError = "";
 
@@ -1790,6 +1880,7 @@ async function geocodeEntryLocationFromForm() {
 
 async function selectEntryPhoto(file) {
   captureEntryFormDraft();
+  state.composeDiscardConfirm = false;
   state.entryPhotoError = "processing photo...";
   renderCompose();
 
@@ -2158,7 +2249,7 @@ function closeTopOverlay() {
   if ($("share-overlay").classList.contains("active")) return closeShareScreen();
   if ($("link-overlay").classList.contains("active")) return closeLinkScreen();
   if ($("trip-form-overlay").classList.contains("active")) return closeTripForm();
-  if ($("compose-overlay").classList.contains("active")) return closeCompose();
+  if ($("compose-overlay").classList.contains("active")) return requestCloseCompose();
   if ($("entry-overlay").classList.contains("active")) return closeEntry();
   if ($("trip-overlay").classList.contains("active")) return closeTrip();
 }
@@ -2375,9 +2466,16 @@ function bindEvents() {
   $("compose-overlay").addEventListener("click", event => {
     const action = event.target.closest("[data-action]");
     if (!action) return;
-    if (action.dataset.action === "compose-back") return closeCompose();
+    if (action.dataset.action === "compose-back") return requestCloseCompose();
+    if (action.dataset.action === "confirm-discard-compose") return closeCompose();
+    if (action.dataset.action === "cancel-discard-compose") {
+      state.composeDiscardConfirm = false;
+      renderCompose();
+      return;
+    }
     if (action.dataset.action === "change-entry-location") {
       captureEntryFormDraft();
+      state.composeDiscardConfirm = false;
       state.isChangingEntryLocation = true;
       state.entryLocationError = "";
       renderCompose();
@@ -2386,6 +2484,7 @@ function bindEvents() {
     }
     if (action.dataset.action === "cancel-location-change") {
       captureEntryFormDraft();
+      state.composeDiscardConfirm = false;
       state.isChangingEntryLocation = false;
       state.entryLocationError = "";
       renderCompose();
@@ -2393,6 +2492,7 @@ function bindEvents() {
     }
     if (action.dataset.action === "remove-entry-photo") {
       captureEntryFormDraft();
+      state.composeDiscardConfirm = false;
       state.entryPhotoDraft = null;
       state.entryPhotoRemoved = true;
       state.entryPhotoError = "";

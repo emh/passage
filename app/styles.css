@@ -714,10 +714,17 @@ h1 {
 }
 
 .file-input {
-  border-bottom: 0;
-  color: var(--ink-light);
-  font-family: var(--mono);
-  font-size: 10.5px;
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.file-picker-link {
+  cursor: pointer;
 }
 
 .photo-preview {
@@ -789,6 +796,33 @@ h1 {
 .delete-confirm-row .action-link {
   padding-top: 0;
   padding-bottom: 4px;
+}
+
+.discard-confirm {
+  position: fixed;
+  z-index: 240;
+  right: 18px;
+  bottom: calc(22px + env(safe-area-inset-bottom, 0));
+  left: 18px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: center;
+  gap: 14px;
+  max-width: 520px;
+  margin: 0 auto;
+  padding: 9px 16px;
+  border: 1px solid var(--rule);
+  background: var(--paper);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.06);
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0;
+}
+
+.discard-confirm .action-link {
+  padding: 0;
 }
 
 .field-row {
