@@ -14,6 +14,9 @@
       <div class="title-row">
         <h1>passage</h1>
         <div class="title-actions">
+          <button class="action-link header-link activity-link" id="activity-btn" type="button">
+            <span class="activity-badge" id="activity-badge" hidden>0</span>
+          </button>
           <span class="sync-dot local" id="sync-dot" aria-label="local only" title="local only"></span>
           <button class="action-link header-link" id="link-device-btn" data-action="open-link" type="button">LINK</button>
         </div>
@@ -56,6 +59,10 @@
 
   <section class="overlay" id="share-overlay" aria-hidden="true">
     <div class="overlay-body" id="share-body" tabindex="-1"></div>
+  </section>
+
+  <section class="overlay" id="activity-overlay" aria-hidden="true">
+    <div class="overlay-body" id="activity-body" tabindex="-1"></div>
   </section>
 
   <section class="overlay" id="link-overlay" aria-hidden="true">

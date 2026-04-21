@@ -50,7 +50,7 @@ test("trip rooms normalize share metadata and restrict to one trip", () => {
   }), room), /Invalid trip/);
 });
 
-test("worker validation accepts trip and entry mutations for the room profile", () => {
+test("worker validation accepts trip, entry, comment, and profile state mutations for the room profile", () => {
   const room = normalizeProfileRoom({
     code: "pass1234",
     profile: { id: "profile-1" }
@@ -70,11 +70,27 @@ test("worker validation accepts trip and entry mutations for the room profile", 
     value: { id: "entry-1", tripId: "trip-1", body: "First sunset.", timestamp: "2026-04-01T19:00:00.000Z" }
   }), room);
 
+  const comment = validateMutation(mutation({
+    entityType: "comment",
+    entityId: "comment-1",
+    field: "_create",
+    value: { id: "comment-1", entryId: "entry-1", tripId: "trip-1", body: "Great spot." }
+  }), room);
+
+  const profileState = validateMutation(mutation({
+    entityType: "profileState",
+    entityId: "profile-1",
+    field: "activitySeenAt",
+    value: "2026-04-21T12:00:00.000Z"
+  }), room);
+
   assert.equal(trip.value.title, "Road trip");
   assert.equal(entry.value.tripId, "trip-1");
+  assert.equal(comment.value.body, "Great spot.");
+  assert.equal(profileState.value, "2026-04-21T12:00:00.000Z");
 });
 
-test("worker materialization applies entry updates and filters deleted records", () => {
+test("worker materialization applies entry updates and comments, ignores legacy reactions, and filters deleted records", () => {
   const room = normalizeProfileRoom({
     code: "pass1234",
     profile: { id: "profile-1" }
@@ -104,20 +120,38 @@ test("worker materialization applies entry updates and filters deleted records",
     timestamp: hlc(102),
     value: "Second draft."
   });
+  const createComment = mutation({
+    id: "comment-create",
+    entityType: "comment",
+    entityId: "comment-1",
+    field: "_create",
+    timestamp: hlc(103),
+    value: { id: "comment-1", entryId: "entry-1", tripId: "trip-1", body: "Great spot." }
+  });
+  const legacyReaction = mutation({
+    id: "reaction-create",
+    entityType: "reaction",
+    entityId: "reaction-1",
+    field: "_create",
+    timestamp: hlc(104),
+    value: { id: "reaction-1", entryId: "entry-1", tripId: "trip-1", kind: "like" }
+  });
   const deleteTrip = mutation({
     id: "trip-delete",
     entityType: "trip",
     entityId: "trip-1",
     field: "_delete",
-    timestamp: hlc(103),
+    timestamp: hlc(105),
     value: true
   });
 
-  const visible = materializeMutations([createTrip, createEntry, updateEntry], room);
+  const visible = materializeMutations([createTrip, createEntry, updateEntry, createComment, legacyReaction], room);
   assert.equal(visible.trips.length, 1);
   assert.equal(visible.entries[0].body, "Second draft.");
+  assert.equal(visible.comments[0].body, "Great spot.");
+  assert.equal("reactions" in visible, false);
 
-  const deleted = materializeMutations([createTrip, createEntry, updateEntry, deleteTrip], room);
+  const deleted = materializeMutations([createTrip, createEntry, updateEntry, createComment, legacyReaction, deleteTrip], room);
   assert.equal(deleted.trips.length, 0);
 });
 

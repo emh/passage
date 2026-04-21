@@ -1,7 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { applyMutation, isTripSharedByOtherProfile, normalizeEntry } from "../app/model.js";
+import {
+  applyMutation,
+  createComment,
+  isTripSharedByOtherProfile,
+  normalizeEntry,
+  visibleComments
+} from "../app/model.js";
 import { createInitialState } from "../app/storage.js";
 
 test("trip title keeps the newest mutation", () => {
@@ -76,6 +82,51 @@ test("entry create and delete mutations update the entry record", () => {
   assert.equal(state.entries[0].tripId, "trip-1");
   assert.equal(state.entries[0].geotagStatus, "ready");
   assert.equal(state.entries[0].deleted, true);
+});
+
+test("comment mutations create and delete social records", () => {
+  const state = createInitialState();
+  const entry = { id: "entry-1", tripId: "trip-1" };
+  const profile = { id: "profile-1", name: "Evan" };
+  const comment = createComment(entry, profile, "Looks excellent.");
+
+  applyMutation(state, {
+    id: "m-comment-create",
+    entityType: "comment",
+    entityId: comment.id,
+    field: "_create",
+    value: comment,
+    timestamp: "0000000000100:0000:device-a"
+  });
+
+  assert.equal(visibleComments(state.comments).length, 1);
+  assert.equal(state.comments[0].body, "Looks excellent.");
+
+  applyMutation(state, {
+    id: "m-comment-delete",
+    entityType: "comment",
+    entityId: comment.id,
+    field: "_delete",
+    value: true,
+    timestamp: "0000000000200:0000:device-a"
+  });
+
+  assert.equal(visibleComments(state.comments).length, 0);
+});
+
+test("profile state mutations update activity seen timestamp", () => {
+  const state = createInitialState();
+
+  applyMutation(state, {
+    id: "m-profile-state",
+    entityType: "profileState",
+    entityId: state.profile.id,
+    field: "activitySeenAt",
+    value: "2026-04-21T12:00:00.000Z",
+    timestamp: "0000000000100:0000:device-a"
+  });
+
+  assert.equal(state.activitySeenAt, "2026-04-21T12:00:00.000Z");
 });
 
 test("entries keep legacy body text as description and normalize photo metadata", () => {

@@ -3,13 +3,15 @@ import {
   createDeviceId,
   createMutation,
   createProfile,
+  ENTITY_TYPES,
+  normalizeComment,
   normalizeEntry,
   normalizeProfile,
   normalizeTrip
 } from "./model.js";
 
 export const STATE_STORAGE_KEY = "passage_v1";
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 5;
 
 export function createInitialState() {
   return {
@@ -19,8 +21,12 @@ export function createInitialState() {
     hlc: { wallTime: 0, counter: 0 },
     trips: [],
     entries: [],
+    comments: [],
     tripClocks: {},
     entryClocks: {},
+    commentClocks: {},
+    profileStateClocks: {},
+    activitySeenAt: "",
     profileSync: createSyncState(),
     sharedTripSync: {}
   };
@@ -78,8 +84,20 @@ export function normalizeStoredState(data = {}) {
         }))
         .filter(entry => entry.tripId)
       : [],
+    comments: Array.isArray(data.comments)
+      ? data.comments
+        .map(comment => normalizeComment({
+          ...comment,
+          authorProfileId: comment?.authorProfileId || profile.id,
+          authorName: comment?.authorName || profile.name || ""
+        }))
+        .filter(comment => comment.entryId && comment.tripId)
+      : [],
     tripClocks: plainObject(data.tripClocks),
     entryClocks: plainObject(data.entryClocks),
+    commentClocks: plainObject(data.commentClocks),
+    profileStateClocks: plainObject(data.profileStateClocks),
+    activitySeenAt: typeof data.activitySeenAt === "string" ? data.activitySeenAt : "",
     profileSync: normalizeSyncState(data.profileSync),
     sharedTripSync: normalizeSharedTripSync(data.sharedTripSync)
   };
@@ -110,8 +128,12 @@ function serializeState(state) {
     hlc: normalizeClock(state.hlc),
     trips: state.trips || [],
     entries: state.entries || [],
+    comments: state.comments || [],
     tripClocks: state.tripClocks || {},
     entryClocks: state.entryClocks || {},
+    commentClocks: state.commentClocks || {},
+    profileStateClocks: state.profileStateClocks || {},
+    activitySeenAt: typeof state.activitySeenAt === "string" ? state.activitySeenAt : "",
     profileSync: normalizeSyncState(state.profileSync),
     sharedTripSync: normalizeSharedTripSync(state.sharedTripSync)
   };
@@ -225,7 +247,7 @@ function isPrivateNetworkHost(host) {
 function isQueuedMutation(mutation) {
   return Boolean(
     mutation &&
-    ["trip", "entry"].includes(mutation.entityType) &&
+    ENTITY_TYPES.includes(mutation.entityType) &&
     typeof mutation.entityId === "string" &&
     typeof mutation.field === "string" &&
     typeof mutation.timestamp === "string"

@@ -42,6 +42,23 @@ export const ENTRY_FIELDS = [
   "deleted"
 ];
 
+export const COMMENT_FIELDS = [
+  "entryId",
+  "tripId",
+  "body",
+  "authorProfileId",
+  "authorName",
+  "dateCreated",
+  "dateUpdated",
+  "deleted"
+];
+
+export const PROFILE_STATE_FIELDS = [
+  "activitySeenAt"
+];
+
+export const ENTITY_TYPES = ["trip", "entry", "comment", "profileState"];
+
 export function createId(prefix = "id") {
   if (globalThis.crypto?.randomUUID) return `${prefix}-${globalThis.crypto.randomUUID()}`;
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
@@ -234,6 +251,33 @@ export function createEntry(tripId, fields = {}) {
   return createJournalEntry(tripId, fields);
 }
 
+export function normalizeComment(input = {}) {
+  const now = new Date().toISOString();
+  return {
+    id: String(input.id || createId("comment")),
+    entryId: String(input.entryId || ""),
+    tripId: String(input.tripId || ""),
+    body: cleanText(input.body),
+    authorProfileId: String(input.authorProfileId || "").trim(),
+    authorName: normalizeUserName(input.authorName),
+    dateCreated: typeof input.dateCreated === "string" && input.dateCreated ? input.dateCreated : now,
+    dateUpdated: typeof input.dateUpdated === "string" ? input.dateUpdated : "",
+    deleted: Boolean(input.deleted)
+  };
+}
+
+export function createComment(entry, profile, body) {
+  return normalizeComment({
+    id: createId("comment"),
+    entryId: entry?.id || "",
+    tripId: entry?.tripId || "",
+    body,
+    authorProfileId: profile?.id || "",
+    authorName: profile?.name || "",
+    dateCreated: new Date().toISOString()
+  });
+}
+
 export function visibleTrips(trips = []) {
   return trips.filter(trip => !trip.deleted);
 }
@@ -242,10 +286,20 @@ export function visibleEntries(entries = []) {
   return entries.filter(entry => !entry.deleted);
 }
 
+export function visibleComments(comments = []) {
+  return comments.filter(comment => !comment.deleted);
+}
+
 export function entriesForTrip(entries, tripId) {
   return visibleEntries(entries)
     .filter(entry => entry.tripId === String(tripId))
     .sort((left, right) => new Date(left.timestamp) - new Date(right.timestamp));
+}
+
+export function commentsForEntry(comments, entryId) {
+  return visibleComments(comments)
+    .filter(comment => comment.entryId === String(entryId))
+    .sort((left, right) => new Date(left.dateCreated) - new Date(right.dateCreated));
 }
 
 export function tripEntryCounts(entries, tripId) {
@@ -282,6 +336,8 @@ export function applyMutation(state, mutation) {
 
   if (mutation.entityType === "trip") return applyTripMutation(state, mutation);
   if (mutation.entityType === "entry") return applyEntryMutation(state, mutation);
+  if (mutation.entityType === "comment") return applyCommentMutation(state, mutation);
+  if (mutation.entityType === "profileState") return applyProfileStateMutation(state, mutation);
   return false;
 }
 
@@ -424,6 +480,60 @@ function applyEntryMutation(state, mutation) {
   return true;
 }
 
+function applyCommentMutation(state, mutation) {
+  state.commentClocks ||= {};
+  state.commentClocks[mutation.entityId] ||= {};
+  const clocks = state.commentClocks[mutation.entityId];
+
+  if (mutation.field === "_create") {
+    const incoming = normalizeComment({ ...mutation.value, id: mutation.entityId });
+    let comment = state.comments.find(candidate => candidate.id === mutation.entityId);
+    if (!comment) {
+      state.comments.push(incoming);
+      comment = state.comments[state.comments.length - 1];
+    }
+
+    for (const field of COMMENT_FIELDS) {
+      if (Object.hasOwn(incoming, field) && shouldApply(clocks[field], mutation.timestamp)) {
+        comment[field] = incoming[field];
+        clocks[field] = mutation.timestamp;
+      }
+    }
+    clocks._create = maxHlc(clocks._create, mutation.timestamp);
+    return true;
+  }
+
+  const field = mutation.field === "_delete" ? "deleted" : mutation.field;
+  if (!COMMENT_FIELDS.includes(field)) return false;
+
+  let comment = state.comments.find(candidate => candidate.id === mutation.entityId);
+  if (!comment) {
+    comment = normalizeComment({
+      id: mutation.entityId,
+      entryId: field === "entryId" ? mutation.value : "",
+      tripId: field === "tripId" ? mutation.value : ""
+    });
+    state.comments.push(comment);
+  }
+
+  if (!shouldApply(clocks[field], mutation.timestamp)) return false;
+  comment[field] = coerceCommentField(field, mutation.value);
+  clocks[field] = mutation.timestamp;
+  return true;
+}
+
+function applyProfileStateMutation(state, mutation) {
+  state.profileStateClocks ||= {};
+  state.profileStateClocks[mutation.entityId] ||= {};
+  const clocks = state.profileStateClocks[mutation.entityId];
+  const field = mutation.field;
+  if (!PROFILE_STATE_FIELDS.includes(field)) return false;
+  if (!shouldApply(clocks[field], mutation.timestamp)) return false;
+  state[field] = coerceProfileStateField(field, mutation.value);
+  clocks[field] = mutation.timestamp;
+  return true;
+}
+
 function normalizeCities(value) {
   const raw = Array.isArray(value) ? value : String(value || "").split(",");
   return Array.from(new Set(raw
@@ -513,6 +623,21 @@ function coerceEntryField(field, value) {
   return cleanSingleLine(value);
 }
 
+function coerceCommentField(field, value) {
+  if (field === "deleted") return Boolean(value);
+  if (field === "body") return cleanText(value);
+  if (field === "entryId" || field === "tripId" || field === "authorProfileId") return String(value || "").trim();
+  if (field === "authorName") return normalizeUserName(value);
+  if (field === "dateCreated") return validDateTime(value) || new Date().toISOString();
+  if (field === "dateUpdated") return validDateTime(value);
+  return cleanSingleLine(value);
+}
+
+function coerceProfileStateField(field, value) {
+  if (field === "activitySeenAt") return validDateTime(value);
+  return cleanSingleLine(value);
+}
+
 function normalizeClock(clock) {
   return {
     wallTime: Number.isFinite(clock?.wallTime) ? clock.wallTime : 0,
@@ -533,7 +658,7 @@ function maxHlc(left, right) {
 function isMutationLike(mutation) {
   return Boolean(
     mutation &&
-    ["trip", "entry"].includes(mutation.entityType) &&
+    ENTITY_TYPES.includes(mutation.entityType) &&
     typeof mutation.entityId === "string" &&
     typeof mutation.field === "string" &&
     typeof mutation.timestamp === "string"

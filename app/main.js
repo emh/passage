@@ -1,7 +1,10 @@
 import {
   applyMutations,
   applyMutation,
+  COMMENT_FIELDS,
+  commentsForEntry,
   compareHlc,
+  createComment,
   createMutation,
   createEntry,
   createTrip,
@@ -13,6 +16,7 @@ import {
   isTripActive,
   isTripPast,
   normalizeCode,
+  normalizeComment,
   normalizeEntry,
   normalizeProfile,
   normalizeTrip,
@@ -20,6 +24,7 @@ import {
   TRIP_FIELDS,
   toDateTimeInputValue,
   tripEntryCounts,
+  visibleComments,
   visibleEntries,
   visibleTrips
 } from "./model.js";
@@ -73,6 +78,12 @@ const state = {
   entryPhotoError: "",
   entryPhotoNote: "",
   composeInitialSnapshot: null,
+  commentDraft: "",
+  inlineCommentDrafts: new Map(),
+  editingCommentId: "",
+  commentEditDraft: "",
+  expandedCommentEntryIds: new Set(),
+  activitySeenAt: loadedState.activitySeenAt || "",
   confirmation: null,
   geolocationStatus: "checking",
   geolocationMessage: "checking location...",
@@ -97,6 +108,11 @@ function esc(value) {
   const div = document.createElement("div");
   div.textContent = value == null ? "" : String(value);
   return div.innerHTML;
+}
+
+function cssEscape(value) {
+  const text = String(value || "");
+  return globalThis.CSS?.escape ? globalThis.CSS.escape(text) : text.replace(/["\\]/g, "\\$&");
 }
 
 function save() {
@@ -356,6 +372,10 @@ function getEntry(id) {
   return visibleEntries(state.entries).find(entry => entry.id === String(id)) || null;
 }
 
+function getComment(id) {
+  return visibleComments(state.comments).find(comment => comment.id === String(id)) || null;
+}
+
 function plural(count, singular, pluralValue = `${singular}s`) {
   return `${count} ${count === 1 ? singular : pluralValue}`;
 }
@@ -416,6 +436,32 @@ function routeLabel(trip) {
 
 function isReadOnlyTrip(trip) {
   return isTripSharedByOtherProfile(trip, state.profile);
+}
+
+function isCurrentProfile(profileId, name = "") {
+  const currentId = String(state.profile?.id || "").trim();
+  const candidateId = String(profileId || "").trim();
+  if (currentId && candidateId) return currentId === candidateId;
+
+  const currentName = normalizeUserName(state.profile?.name || "");
+  const candidateName = normalizeUserName(name);
+  return Boolean(currentName && candidateName && currentName === candidateName);
+}
+
+function isTripOwner(trip) {
+  return isCurrentProfile(trip?.ownerProfileId, trip?.ownerName);
+}
+
+function isCommentAuthor(comment) {
+  return isCurrentProfile(comment?.authorProfileId, comment?.authorName);
+}
+
+function canEditComment(comment) {
+  return isCommentAuthor(comment);
+}
+
+function canDeleteComment(comment) {
+  return isCommentAuthor(comment) || isTripOwner(getTrip(comment?.tripId));
 }
 
 function tripSharedByLabel(trip) {
@@ -621,7 +667,9 @@ function currentPositionLabel() {
 
 function queueLocalMutation(entityType, entityId, field, value) {
   const trip = tripForLocalMutation(entityType, entityId, value);
-  assertTripWritable(trip);
+  if (entityType === "trip" || entityType === "entry") {
+    assertTripWritable(trip);
+  }
 
   const mutation = createMutation(state, entityType, entityId, field, value);
   if (applyMutation(state, mutation)) {
@@ -686,6 +734,13 @@ function sharedCodeForMutation(entityType, entityId, value) {
 
 function tripIdForMutation(entityType, entityId, value) {
   if (entityType === "trip") return String(entityId || "");
+  if (value?.tripId) return String(value.tripId || "");
+
+  if (entityType === "comment") {
+    const comment = getComment(entityId) || state.comments.find(candidate => candidate.id === String(entityId));
+    return comment?.tripId || "";
+  }
+
   const entry = getEntry(entityId) || state.entries.find(candidate => candidate.id === String(entityId));
   return entry?.tripId || String(value?.tripId || "");
 }
@@ -1008,9 +1063,131 @@ function renderList() {
   }).join("");
 }
 
+function entryComments(entryId) {
+  return commentsForEntry(state.comments, entryId);
+}
+
+function formatActivityTime(iso) {
+  const date = new Date(iso || "");
+  if (Number.isNaN(date.getTime())) return "";
+  return `${formatDate(date.toISOString().slice(0, 10))} | ${formatTime(date.toISOString())}`;
+}
+
+function activityItems() {
+  const entriesById = new Map(visibleEntries(state.entries).map(entry => [entry.id, entry]));
+  const tripsById = new Map(visibleTrips(state.trips).map(trip => [trip.id, trip]));
+  const items = [];
+
+  for (const comment of visibleComments(state.comments)) {
+    const entry = entriesById.get(comment.entryId);
+    const trip = tripsById.get(comment.tripId);
+    if (!entry || !trip) continue;
+    items.push({
+      id: comment.id,
+      type: "comment",
+      dateCreated: comment.dateCreated,
+      authorName: comment.authorName,
+      authorProfileId: comment.authorProfileId,
+      body: comment.body,
+      entry,
+      trip
+    });
+  }
+
+  return items.sort((left, right) => new Date(right.dateCreated) - new Date(left.dateCreated));
+}
+
+function unseenActivityCount() {
+  const seenAt = Date.parse(state.activitySeenAt || "") || 0;
+  const profileId = String(state.profile?.id || "").trim();
+  return activityItems().filter(item => {
+    if (profileId && item.authorProfileId === profileId) return false;
+    return (Date.parse(item.dateCreated || "") || 0) > seenAt;
+  }).length;
+}
+
+function renderActivityIndicator() {
+  const button = $("activity-btn");
+  const badge = $("activity-badge");
+  if (!button || !badge) return;
+
+  const count = unseenActivityCount();
+  badge.hidden = !count;
+  badge.textContent = count > 99 ? "99+" : String(count);
+  button.title = count ? `${plural(count, "new item")} of activity` : "activity";
+}
+
+function markActivitySeen() {
+  const profileId = String(state.profile?.id || "").trim();
+  if (!profileId) return;
+  const seenAt = new Date().toISOString();
+  queueLocalMutation("profileState", profileId, "activitySeenAt", seenAt);
+  saveAndFlushSync();
+}
+
+function renderActivityScreen() {
+  const body = $("activity-body");
+  if (!body) return;
+
+  const items = activityItems();
+  body.innerHTML = `
+    <button class="back-btn" data-action="activity-back" type="button">BACK</button>
+    <h2 class="screen-title">Activity</h2>
+    ${items.length ? `
+      <div class="activity-list">
+        ${items.map(renderActivityItem).join("")}
+      </div>
+    ` : '<div class="empty-state">no comments yet.</div>'}
+  `;
+}
+
+function renderActivityItem(item) {
+  const author = item.authorName || "Someone";
+  const entryLabel = item.entry.title || firstLine(entryDescription(item.entry)) || "entry";
+  const time = formatActivityTime(item.dateCreated);
+  const body = firstLine(item.body);
+
+  return `
+    <button class="activity-item" data-action="open-activity-entry" data-entry-id="${esc(item.entry.id)}" type="button">
+      <span class="activity-meta">${esc(`${author} commented`)}${time ? ` | ${esc(time)}` : ""}</span>
+      <span class="activity-title">${esc(item.trip.title)} | ${esc(entryLabel)}</span>
+      ${body ? `<span class="activity-text">${esc(body)}</span>` : ""}
+    </button>
+  `;
+}
+
+function firstLine(value) {
+  return String(value || "").split("\n").map(part => part.trim()).filter(Boolean)[0] || "";
+}
+
+function openActivityScreen() {
+  markActivitySeen();
+  renderActivityIndicator();
+  renderActivityScreen();
+  openOverlay("activity-overlay");
+  requestAnimationFrame(() => $("activity-body")?.focus());
+}
+
+function closeActivityScreen() {
+  closeOverlay("activity-overlay");
+}
+
+function openActivityEntry(entryId) {
+  const entry = getEntry(entryId);
+  if (!entry) {
+    toast("entry is no longer available");
+    return;
+  }
+
+  closeActivityScreen();
+  showTrip(entry.tripId);
+  openEntry(entry.id);
+}
+
 function renderAll() {
   renderLocationStatus();
   renderSyncIndicator();
+  renderActivityIndicator();
   renderStats();
   renderList();
   schedulePhotoWork();
@@ -1082,6 +1259,17 @@ function backfillProfileIdentity() {
     });
     queueEntityPatch("entry", entry, nextEntry, ENTRY_FIELDS);
   }
+
+  for (const comment of visibleComments(state.comments)) {
+    if (comment.authorProfileId && comment.authorProfileId !== profileId) continue;
+    const nextComment = normalizeComment({
+      ...comment,
+      authorProfileId: profileId,
+      authorName: profileName
+    });
+    queueEntityPatch("comment", comment, nextComment, COMMENT_FIELDS);
+  }
+
 }
 
 async function saveSetupName() {
@@ -1125,8 +1313,11 @@ function applyRemotePayload(payload, options = {}) {
   if (options.replaceLocal) {
     state.trips = [];
     state.entries = [];
+    state.comments = [];
     state.tripClocks = {};
     state.entryClocks = {};
+    state.commentClocks = {};
+    state.profileStateClocks = {};
     state.profileSync.mutationQueue = [];
     state.profileSync.lastSyncTimestamp = "";
     state.sharedTripSync = {};
@@ -1172,6 +1363,9 @@ function seedProfileQueueFromTrip(tripId) {
   syncQueue().push(createMutation(state, "trip", trip.id, "_create", trip));
   for (const entry of entriesForTrip(state.entries, trip.id)) {
     syncQueue().push(createMutation(state, "entry", entry.id, "_create", entry));
+  }
+  for (const comment of visibleComments(state.comments).filter(comment => comment.tripId === trip.id)) {
+    syncQueue().push(createMutation(state, "comment", comment.id, "_create", comment));
   }
 }
 
@@ -1232,7 +1426,8 @@ async function ensureTripShared(trip) {
 
   const payload = await createRemoteTrip({
     trip,
-    entries: entriesForTrip(state.entries, trip.id)
+    entries: entriesForTrip(state.entries, trip.id),
+    comments: visibleComments(state.comments).filter(comment => comment.tripId === trip.id)
   }, state.settings);
 
   queueLocalMutation("trip", trip.id, "sharedCode", payload.code);
@@ -1621,9 +1816,44 @@ function renderEntryItem(entry) {
         ${renderEntryPhoto(entry, "summary")}
         ${paragraphs}
         ${url ? `<a class="entry-link" href="${esc(url)}" target="_blank" rel="noreferrer">${esc(entryUrlLabel(url))}</a>` : ""}
+        ${renderEntryCommentSummary(entry)}
       </div>
     </article>
   `;
+}
+
+function renderEntryCommentSummary(entry) {
+  const comments = entryComments(entry.id);
+  const expanded = state.expandedCommentEntryIds.has(entry.id);
+  const label = comments.length ? plural(comments.length, "comment") : "NO COMMENTS";
+
+  return `
+    <div class="entry-comments-block">
+      <button class="entry-comments-toggle" data-action="toggle-entry-comments" data-entry-id="${esc(entry.id)}" type="button">${esc(label)}</button>
+      ${expanded ? `
+        <div class="entry-inline-comments">
+          ${comments.length ? comments.map(comment => renderComment(comment)).join("") : ""}
+          <input class="field-input inline-comment-input" data-entry-id="${esc(entry.id)}" value="${esc(state.inlineCommentDrafts.get(entry.id) || "")}" placeholder="Leave a comment..." autocomplete="off">
+        </div>
+      ` : ""}
+    </div>
+  `;
+}
+
+function toggleEntryComments(entryId) {
+  const id = String(entryId || "");
+  if (!id) return;
+  let expanded = false;
+  if (state.expandedCommentEntryIds.has(id)) {
+    state.expandedCommentEntryIds.delete(id);
+  } else {
+    state.expandedCommentEntryIds.add(id);
+    expanded = true;
+  }
+  renderTrip();
+  if (expanded) {
+    requestAnimationFrame(() => document.querySelector(`.inline-comment-input[data-entry-id="${cssEscape(id)}"]`)?.focus());
+  }
 }
 
 function renderEntryPhoto(entry, variant = "summary") {
@@ -1658,9 +1888,52 @@ function bodyParagraphs(value) {
     : "";
 }
 
+function renderEntrySocial(entry) {
+  const comments = entryComments(entry.id);
+
+  return `
+    <section class="entry-social">
+      ${comments.length ? `<div class="comments-list">${comments.map(renderComment).join("")}</div>` : ""}
+      <input class="field-input comment-input" id="comment-input" value="${esc(state.commentDraft)}" placeholder="Leave a comment..." autocomplete="off">
+    </section>
+  `;
+}
+
+function renderComment(comment) {
+  const meta = [comment.authorName || "Someone", formatActivityTime(comment.dateCreated)].filter(Boolean).join(" | ");
+  const editing = state.editingCommentId === comment.id;
+  return `
+    <article class="comment">
+      <div class="comment-meta">${esc(meta)}</div>
+      ${editing ? `
+        <input class="field-input comment-edit-input" data-comment-id="${esc(comment.id)}" value="${esc(state.commentEditDraft)}" autocomplete="off">
+        <div class="comment-actions">
+          <button class="action-link" data-action="save-comment-edit" data-comment-id="${esc(comment.id)}" type="button">SAVE</button>
+          <button class="action-link secondary" data-action="cancel-comment-edit" type="button">CANCEL</button>
+        </div>
+      ` : `
+        <div class="comment-body">${bodyParagraphs(comment.body)}</div>
+        ${renderCommentActions(comment)}
+      `}
+    </article>
+  `;
+}
+
+function renderCommentActions(comment) {
+  const actions = [];
+  if (canEditComment(comment)) {
+    actions.push(`<button class="action-link" data-action="edit-comment" data-comment-id="${esc(comment.id)}" type="button">EDIT</button>`);
+  }
+  if (canDeleteComment(comment)) {
+    actions.push(`<button class="action-link destructive" data-action="delete-comment" data-comment-id="${esc(comment.id)}" type="button">DELETE</button>`);
+  }
+  return actions.length ? `<div class="comment-actions">${actions.join("")}</div>` : "";
+}
+
 function openEntry(entryId) {
   const entry = getEntry(entryId);
   if (!entry) return;
+  if (state.currentEntryId !== entry.id) state.commentDraft = "";
   state.currentEntryId = entry.id;
   renderEntry();
   openOverlay("entry-overlay");
@@ -1670,6 +1943,9 @@ function closeEntry() {
   entryMap = destroyMap(entryMap);
   closeOverlay("entry-overlay");
   state.currentEntryId = null;
+  state.commentDraft = "";
+  state.editingCommentId = "";
+  state.commentEditDraft = "";
   clearConfirmation("entry");
 }
 
@@ -1704,10 +1980,140 @@ function renderEntry() {
       ${bodyParagraphs(entryDescription(entry))}
       ${entry.url ? `<a class="entry-link" href="${esc(entry.url)}" target="_blank" rel="noreferrer">${esc(entryUrlLabel(entry.url))}</a>` : ""}
     </div>
+    ${renderEntrySocial(entry)}
     ${actions}
   `;
 
   requestAnimationFrame(() => renderEntryMap(entry.id));
+}
+
+function saveCommentFromForm() {
+  const entry = getEntry(state.currentEntryId);
+  if (!entry) return;
+  const body = ($("comment-input")?.value || state.commentDraft || "").trim();
+  saveCommentForEntry(entry, body, () => {
+    state.commentDraft = "";
+  });
+}
+
+function saveInlineCommentFromForm(entryId) {
+  const entry = getEntry(entryId);
+  if (!entry) return;
+  const body = String(state.inlineCommentDrafts.get(entry.id) || "").trim();
+  saveCommentForEntry(entry, body, () => {
+    state.inlineCommentDrafts.delete(entry.id);
+    state.expandedCommentEntryIds.add(entry.id);
+  });
+}
+
+function saveCommentForEntry(entry, body, onSaved) {
+  if (!hasProfileName()) {
+    openSetupScreen();
+    return;
+  }
+
+  if (!body) {
+    toast("comment required");
+    return;
+  }
+
+  const comment = createComment(entry, state.profile, body);
+  queueEntityCreate("comment", comment);
+  onSaved?.();
+  saveAndFlushSync();
+  renderAll();
+  renderCommentSurfaces();
+  toast("comment added");
+}
+
+function renderCommentSurfaces() {
+  if ($("trip-overlay").classList.contains("active") && state.currentTripId) {
+    renderTrip();
+  }
+  if ($("entry-overlay").classList.contains("active") && state.currentEntryId) {
+    renderEntry();
+  }
+  if ($("activity-overlay").classList.contains("active")) {
+    renderActivityScreen();
+  }
+}
+
+function startEditComment(commentId) {
+  const comment = getComment(commentId);
+  if (!comment) return;
+  if (!canEditComment(comment)) {
+    toast("Only the author can edit this comment.");
+    return;
+  }
+
+  state.editingCommentId = comment.id;
+  state.commentEditDraft = comment.body;
+  clearConfirmation("comment");
+  renderCommentSurfaces();
+  requestAnimationFrame(() => {
+    const root = $("entry-overlay").classList.contains("active") ? $("entry-overlay") : $("trip-overlay");
+    root.querySelector(`.comment-edit-input[data-comment-id="${cssEscape(comment.id)}"]`)?.focus();
+  });
+}
+
+function cancelEditComment() {
+  state.editingCommentId = "";
+  state.commentEditDraft = "";
+  renderCommentSurfaces();
+}
+
+function saveEditedComment(commentId) {
+  const comment = getComment(commentId || state.editingCommentId);
+  if (!comment) return;
+  if (!canEditComment(comment)) {
+    toast("Only the author can edit this comment.");
+    return;
+  }
+
+  const body = String(state.commentEditDraft || "").trim();
+  if (!body) {
+    toast("comment required");
+    return;
+  }
+
+  queueLocalMutation("comment", comment.id, "body", body);
+  queueLocalMutation("comment", comment.id, "dateUpdated", new Date().toISOString());
+  state.editingCommentId = "";
+  state.commentEditDraft = "";
+  saveAndFlushSync();
+  renderAll();
+  renderCommentSurfaces();
+  toast("comment updated");
+}
+
+function requestDeleteComment(commentId) {
+  const comment = getComment(commentId);
+  if (!comment) return;
+  if (!canDeleteComment(comment)) {
+    toast("You cannot delete this comment.");
+    return;
+  }
+
+  openConfirmation("comment", "Delete this comment?", "delete-comment", comment.id);
+}
+
+function deleteComment(commentId) {
+  const comment = getComment(commentId);
+  if (!comment) return;
+  if (!canDeleteComment(comment)) {
+    toast("You cannot delete this comment.");
+    return;
+  }
+
+  queueLocalMutation("comment", comment.id, "_delete", true);
+  if (state.editingCommentId === comment.id) {
+    state.editingCommentId = "";
+    state.commentEditDraft = "";
+  }
+  saveAndFlushSync();
+  renderAll();
+  renderCommentSurfaces();
+  toast("comment deleted");
 }
 
 function openCompose(entryId = "") {
@@ -2341,6 +2747,7 @@ function syncBodyScroll() {
 
 function closeTopOverlay() {
   if ($("setup-overlay").classList.contains("active")) return;
+  if ($("activity-overlay").classList.contains("active")) return closeActivityScreen();
   if ($("share-overlay").classList.contains("active")) return closeShareScreen();
   if ($("link-overlay").classList.contains("active")) return closeLinkScreen();
   if ($("trip-form-overlay").classList.contains("active")) return closeTripForm();
@@ -2370,6 +2777,11 @@ function handleConfirmationAction(confirmed) {
   if (confirmation.action === "delete-trip") {
     state.editingTripId = confirmation.contextId;
     runAction(deleteCurrentTrip);
+    return;
+  }
+
+  if (confirmation.action === "delete-comment") {
+    runAction(() => deleteComment(confirmation.contextId));
     return;
   }
 
@@ -2417,6 +2829,10 @@ function syncOpenViews() {
 
   if ($("share-overlay").classList.contains("active")) {
     renderShareScreen();
+  }
+
+  if ($("activity-overlay").classList.contains("active")) {
+    renderActivityScreen();
   }
 
   if ($("setup-overlay").classList.contains("active")) {
@@ -2519,6 +2935,7 @@ function bindEvents() {
   const input = $("main-input");
   const status = $("input-status");
   const linkDeviceButton = $("link-device-btn");
+  const activityButton = $("activity-btn");
   $("confirm-root")?.addEventListener("click", event => {
     const action = event.target.closest("[data-action]");
     if (!action) return;
@@ -2557,6 +2974,10 @@ function bindEvents() {
     runAction(openLinkScreen);
   });
 
+  activityButton?.addEventListener("click", () => {
+    openActivityScreen();
+  });
+
   $("trip-overlay").addEventListener("click", event => {
     const action = event.target.closest("[data-action]");
     if (action) {
@@ -2564,10 +2985,15 @@ function bindEvents() {
       if (action.dataset.action === "compose-journal") return runAction(() => openCompose());
       if (action.dataset.action === "share-trip") return runAction(() => openShareScreen(state.currentTripId));
       if (action.dataset.action === "edit-trip") return runAction(() => openTripForm());
+      if (action.dataset.action === "toggle-entry-comments") return toggleEntryComments(action.dataset.entryId);
+      if (action.dataset.action === "edit-comment") return startEditComment(action.dataset.commentId);
+      if (action.dataset.action === "save-comment-edit") return runAction(() => saveEditedComment(action.dataset.commentId));
+      if (action.dataset.action === "cancel-comment-edit") return cancelEditComment();
+      if (action.dataset.action === "delete-comment") return requestDeleteComment(action.dataset.commentId);
     }
 
     const entry = event.target.closest(".entry");
-    if (entry && !event.target.closest("a")) openEntry(entry.dataset.entryId);
+    if (entry && !event.target.closest("a, button, input, textarea, .comment")) openEntry(entry.dataset.entryId);
   });
 
   $("entry-overlay").addEventListener("click", event => {
@@ -2584,6 +3010,63 @@ function bindEvents() {
       const entry = getEntry(state.currentEntryId);
       if (entry && isReadOnlyTrip(getTrip(entry.tripId))) return toast("Shared trips are read only for now.");
       return openConfirmation("entry", "Delete this entry?", "delete-entry", state.currentEntryId);
+    }
+    if (action.dataset.action === "edit-comment") return startEditComment(action.dataset.commentId);
+    if (action.dataset.action === "save-comment-edit") return runAction(() => saveEditedComment(action.dataset.commentId));
+    if (action.dataset.action === "cancel-comment-edit") return cancelEditComment();
+    if (action.dataset.action === "delete-comment") return requestDeleteComment(action.dataset.commentId);
+  });
+
+  $("entry-overlay").addEventListener("input", event => {
+    if (event.target?.id === "comment-input") {
+      state.commentDraft = event.target.value;
+    } else if (event.target?.classList?.contains("comment-edit-input")) {
+      state.commentEditDraft = event.target.value;
+    }
+  });
+
+  $("entry-overlay").addEventListener("keydown", event => {
+    if (event.key === "Enter" && event.target?.id === "comment-input") {
+      event.preventDefault();
+      runAction(saveCommentFromForm);
+      return;
+    }
+
+    if (event.target?.classList?.contains("comment-edit-input")) {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        runAction(() => saveEditedComment(event.target.dataset.commentId));
+      } else if (event.key === "Escape") {
+        event.preventDefault();
+        cancelEditComment();
+      }
+    }
+  });
+
+  $("trip-overlay").addEventListener("input", event => {
+    if (event.target?.classList?.contains("inline-comment-input")) {
+      state.inlineCommentDrafts.set(event.target.dataset.entryId, event.target.value);
+    } else if (event.target?.classList?.contains("comment-edit-input")) {
+      state.commentEditDraft = event.target.value;
+    }
+  });
+
+  $("trip-overlay").addEventListener("keydown", event => {
+    if (event.target?.classList?.contains("inline-comment-input")) {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        runAction(() => saveInlineCommentFromForm(event.target.dataset.entryId));
+      }
+      return;
+    }
+
+    if (!event.target?.classList?.contains("comment-edit-input")) return;
+    if (event.key === "Enter") {
+      event.preventDefault();
+      runAction(() => saveEditedComment(event.target.dataset.commentId));
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      cancelEditComment();
     }
   });
 
@@ -2680,6 +3163,13 @@ function bindEvents() {
     if (!action) return;
     if (action.dataset.action === "share-back") return closeShareScreen();
     if (action.dataset.action === "copy-share-link") return runAction(copyShareLink);
+  });
+
+  $("activity-overlay").addEventListener("click", event => {
+    const action = event.target.closest("[data-action]");
+    if (!action) return;
+    if (action.dataset.action === "activity-back") return closeActivityScreen();
+    if (action.dataset.action === "open-activity-entry") return openActivityEntry(action.dataset.entryId);
   });
 
   $("setup-overlay").addEventListener("click", event => {

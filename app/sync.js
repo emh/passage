@@ -273,11 +273,11 @@ export async function updateRemoteProfile(profile, settings = loadSettings()) {
   return response.json();
 }
 
-export async function createRemoteTrip({ trip, entries }, settings = loadSettings()) {
+export async function createRemoteTrip({ trip, entries, comments }, settings = loadSettings()) {
   const response = await fetch(getEndpoint(settings.syncBaseUrl, "/api/trips"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ trip, entries })
+    body: JSON.stringify({ trip, entries, comments })
   });
 
   if (!response.ok) throw new Error(await getErrorMessage(response));

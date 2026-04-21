@@ -110,7 +110,7 @@ h1 {
 .title-actions {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 10px;
   padding-top: 6px;
   flex: 0 0 auto;
 }
@@ -144,6 +144,26 @@ h1 {
 
 .header-link {
   padding: 0;
+  line-height: 1;
+}
+
+.activity-link {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+}
+
+.activity-badge {
+  display: inline-flex;
+  min-width: 15px;
+  height: 15px;
+  align-items: center;
+  justify-content: center;
+  padding: 0 4px;
+  border: 1px solid var(--link-light);
+  border-radius: 8px;
+  color: var(--link-light);
+  font-size: 9px;
   line-height: 1;
 }
 
@@ -195,8 +215,7 @@ h1 {
 
 .main-input,
 .field-input,
-.field-textarea,
-.comment-textarea {
+.field-textarea {
   width: 100%;
   border: 0;
   border-bottom: 1px solid var(--rule);
@@ -408,6 +427,7 @@ h1 {
 #compose-overlay,
 #trip-form-overlay,
 #link-overlay,
+#activity-overlay,
 #share-overlay {
   z-index: 180;
 }
@@ -628,7 +648,8 @@ h1 {
 }
 
 .entry-body p:last-child,
-.entry-detail-content p:last-child {
+.entry-detail-content p:last-child,
+.comment-body p:last-child {
   margin-bottom: 0;
 }
 
@@ -695,6 +716,124 @@ h1 {
 
 .entry-link:hover {
   color: var(--link-light);
+}
+
+.entry-social {
+  margin-top: 24px;
+  padding-top: 14px;
+  border-top: 1px solid var(--rule);
+}
+
+.entry-comments-block {
+  margin-top: 12px;
+}
+
+.entry-comments-toggle {
+  padding: 4px 0;
+  color: var(--link);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.entry-comments-toggle:hover {
+  color: var(--link-light);
+}
+
+.entry-inline-comments {
+  margin-top: 8px;
+  padding-top: 10px;
+  border-top: 1px solid var(--rule);
+}
+
+.comment-meta,
+.activity-meta {
+  color: var(--ink-light);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0;
+}
+
+.comments-list {
+  margin-bottom: 14px;
+}
+
+.comment {
+  padding: 12px 0;
+  border-top: 1px solid var(--rule);
+}
+
+.comment:first-child {
+  padding-top: 0;
+  border-top: 0;
+}
+
+.comment-meta {
+  margin-bottom: 5px;
+}
+
+.comment-body {
+  color: var(--ink);
+  font-size: 15.5px;
+  line-height: 1.55;
+}
+
+.comment-actions {
+  display: flex;
+  gap: 14px;
+  margin-top: 4px;
+}
+
+.comment-actions .action-link {
+  padding: 2px 0;
+}
+
+.comment-input,
+.inline-comment-input,
+.comment-edit-input {
+  padding: 8px 0;
+  font-size: 15px;
+}
+
+.inline-comment-input {
+  margin-top: 8px;
+}
+
+.activity-list {
+  border-bottom: 1px solid var(--rule);
+}
+
+.activity-item {
+  display: block;
+  width: 100%;
+  padding: 16px 0;
+  border-top: 1px solid var(--rule);
+  color: var(--ink);
+  text-align: left;
+}
+
+.activity-item:active {
+  opacity: 0.65;
+}
+
+.activity-meta,
+.activity-title,
+.activity-text {
+  display: block;
+}
+
+.activity-title {
+  margin-top: 3px;
+  font-size: 16px;
+  line-height: 1.35;
+}
+
+.activity-text {
+  margin-top: 5px;
+  color: var(--ink-mid);
+  font-size: 15px;
+  line-height: 1.45;
 }
 
 .entry-location {

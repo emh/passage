@@ -1,11 +1,15 @@
 import {
   applyMutation,
+  COMMENT_FIELDS,
   compareHlc,
   ENTRY_FIELDS,
+  ENTITY_TYPES,
   normalizeCode,
+  normalizeComment,
   normalizeEntry,
   normalizeProfile,
   normalizeTrip,
+  PROFILE_STATE_FIELDS,
   TRIP_FIELDS
 } from "../../../app/model.js";
 
@@ -13,6 +17,7 @@ const CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 const CODE_LENGTH = 8;
 const INTERNAL_CREATE_HEADER = "X-Passage-Internal-Create";
 const MAX_PHOTO_BYTES = 4 * 1024 * 1024;
+const LEGACY_ENTITY_TYPES = [...ENTITY_TYPES, "reaction"];
 
 export class PassageProfileRoom {
   constructor(state, env) {
@@ -96,7 +101,7 @@ export class PassageProfileRoom {
 
     const room = normalizeTripRoom({ code: route.code, trip: body.trip });
     await this.saveRoom(room);
-    const seed = createTripSeedMutations(body.trip, body.entries, room);
+    const seed = createTripSeedMutations(body.trip, body.entries, body.comments, room);
     await this.insertMutations(seed);
     const payload = await this.materializedPayload(room);
     this.broadcast(null, { type: "mutations", items: seed, highWatermark: await this.highWatermark() });
@@ -120,11 +125,14 @@ export class PassageProfileRoom {
     const room = await this.requireRoom();
     const body = await request.json();
     const accepted = await this.acceptMutations(Array.isArray(body.mutations) ? body.mutations : [], room);
+    const materialized = room.type === "trip" ? materializeMutations(await this.listSince(""), room) : null;
     return json({
       room,
       code: room.code,
       profile: room.profile || null,
-      trip: room.type === "trip" ? materializeMutations(await this.listSince(""), room).trips[0] || null : null,
+      trip: materialized?.trips[0] || null,
+      entries: materialized?.entries || [],
+      comments: materialized?.comments || [],
       mutations: await this.listSince(typeof body.since === "string" ? body.since : ""),
       confirmedIds: accepted.map(mutation => mutation.id),
       highWatermark: await this.highWatermark()
@@ -249,6 +257,8 @@ export class PassageProfileRoom {
         mutations,
         trips: state.trips,
         entries: state.entries,
+        comments: state.comments,
+        activitySeenAt: state.activitySeenAt || "",
         highWatermark: await this.highWatermark()
       }
       : {
@@ -256,6 +266,7 @@ export class PassageProfileRoom {
         code: room.code,
         trip: state.trips[0] || null,
         entries: state.entries,
+        comments: state.comments,
         mutations,
         highWatermark: await this.highWatermark()
       };
@@ -462,7 +473,7 @@ export function validateMutation(input, room) {
     profileId: String(input.profileId || "").trim()
   };
 
-  if (!["trip", "entry"].includes(mutation.entityType)) throw new Error("Invalid entity type");
+  if (!LEGACY_ENTITY_TYPES.includes(mutation.entityType)) throw new Error("Invalid entity type");
   if (!isHlc(mutation.timestamp)) throw new Error("Invalid timestamp");
 
   if (room.type === "profile" && room.profile?.id && mutation.profileId && mutation.profileId !== room.profile.id) {
@@ -470,7 +481,10 @@ export function validateMutation(input, room) {
   }
 
   if (mutation.entityType === "trip") return validateTripMutation(mutation, room);
-  return validateEntryMutation(mutation, room);
+  if (mutation.entityType === "entry") return validateEntryMutation(mutation, room);
+  if (mutation.entityType === "comment") return validateCommentMutation(mutation, room);
+  if (mutation.entityType === "profileState") return validateProfileStateMutation(mutation, room);
+  return validateLegacyReactionMutation(mutation, room);
 }
 
 export function materializeMutations(mutations, room) {
@@ -480,8 +494,11 @@ export function materializeMutations(mutations, room) {
     hlc: { wallTime: 0, counter: 0 },
     trips: [],
     entries: [],
+    comments: [],
     tripClocks: {},
     entryClocks: {},
+    commentClocks: {},
+    profileStateClocks: {},
     profileSync: { mutationQueue: [], lastSyncTimestamp: "" },
     sharedTripSync: {}
   };
@@ -494,7 +511,8 @@ export function materializeMutations(mutations, room) {
 
   return {
     trips: state.trips.filter(trip => !trip.deleted),
-    entries: state.entries.filter(entry => !entry.deleted)
+    entries: state.entries.filter(entry => !entry.deleted),
+    comments: state.comments.filter(comment => !comment.deleted)
   };
 }
 
@@ -524,13 +542,59 @@ function validateEntryMutation(mutation, room) {
   return mutation;
 }
 
-function createTripSeedMutations(rawTrip, rawEntries, room) {
+function validateCommentMutation(mutation, room) {
+  if (mutation.field === "_create") {
+    const comment = normalizeComment({ ...mutation.value, id: mutation.entityId });
+    if (!comment.entryId) throw new Error("Comment entryId is required");
+    if (!comment.tripId) throw new Error("Comment tripId is required");
+    if (!comment.body) throw new Error("Comment body is required");
+    if (room.type === "trip" && comment.tripId !== room.tripId) throw new Error("Invalid comment");
+    return { ...mutation, value: comment };
+  }
+
+  const field = mutation.field === "_delete" ? "deleted" : mutation.field;
+  if (!COMMENT_FIELDS.includes(field)) throw new Error("Invalid comment field");
+  return mutation;
+}
+
+function validateProfileStateMutation(mutation, room) {
+  if (room.type !== "profile") throw new Error("Invalid profile state");
+  if (room.profile?.id && mutation.entityId !== room.profile.id) throw new Error("Invalid profile state");
+  if (!PROFILE_STATE_FIELDS.includes(mutation.field)) throw new Error("Invalid profile state field");
+  return mutation;
+}
+
+function validateLegacyReactionMutation(mutation, room) {
+  if (mutation.field === "_create") {
+    const entryId = String(mutation.value?.entryId || "").trim();
+    const tripId = String(mutation.value?.tripId || "").trim();
+    if (!entryId) throw new Error("Reaction entryId is required");
+    if (!tripId) throw new Error("Reaction tripId is required");
+    if (room.type === "trip" && tripId !== room.tripId) throw new Error("Invalid reaction");
+    return mutation;
+  }
+
+  const field = mutation.field === "_delete" ? "deleted" : mutation.field;
+  if (!["entryId", "tripId", "kind", "authorProfileId", "authorName", "dateCreated", "deleted"].includes(field)) {
+    throw new Error("Invalid reaction field");
+  }
+  return mutation;
+}
+
+function createTripSeedMutations(rawTrip, rawEntries, rawComments, room) {
   const trip = normalizeTrip({ ...rawTrip, id: room.tripId, sharedCode: room.code });
   const entries = Array.isArray(rawEntries)
     ? rawEntries
       .map(entry => normalizeEntry({ ...entry, tripId: room.tripId }))
       .filter(entry => entry.tripId === room.tripId)
       .sort((left, right) => new Date(left.timestamp) - new Date(right.timestamp))
+    : [];
+  const entryIds = new Set(entries.map(entry => entry.id));
+  const comments = Array.isArray(rawComments)
+    ? rawComments
+      .map(comment => normalizeComment({ ...comment, tripId: room.tripId }))
+      .filter(comment => comment.tripId === room.tripId && entryIds.has(comment.entryId) && comment.body)
+      .sort((left, right) => new Date(left.dateCreated) - new Date(right.dateCreated))
     : [];
 
   const wallTime = Date.now();
@@ -540,6 +604,10 @@ function createTripSeedMutations(rawTrip, rawEntries, room) {
 
   for (let index = 0; index < entries.length; index += 1) {
     mutations.push(serverMutation("entry", entries[index].id, "_create", entries[index], wallTime, index + 1, entries[index].authorProfileId));
+  }
+
+  for (let index = 0; index < comments.length; index += 1) {
+    mutations.push(serverMutation("comment", comments[index].id, "_create", comments[index], wallTime, entries.length + index + 1, comments[index].authorProfileId));
   }
 
   return mutations;

@@ -85,5 +85,9 @@ test("loadAppState normalizes v2 state into shared-trip-ready state", t => {
   assert.equal(state.profile.name, "");
   assert.equal(state.trips[0].ownerProfileId, "profile-1");
   assert.equal(state.entries[0].authorProfileId, "profile-1");
+  assert.deepEqual(state.comments, []);
+  assert.deepEqual(state.commentClocks, {});
+  assert.deepEqual(state.profileStateClocks, {});
+  assert.equal(state.activitySeenAt, "");
   assert.deepEqual(state.sharedTripSync, {});
 });
