@@ -6,6 +6,9 @@
   --ink-faint: #cccccc;
   --red: #8b0000;
   --red-light: #a52a2a;
+  --link: #006fd6;
+  --link-light: #1788f2;
+  --link-muted: #4f8fbd;
   --rule: #e0dcd6;
   --hover: rgba(0, 0, 0, 0.025);
   --font: "Crimson Pro", "Palatino Linotype", Palatino, Georgia, serif;
@@ -54,6 +57,14 @@ button {
   cursor: pointer;
 }
 
+.back-btn,
+.action-link,
+.inline-link {
+  font-family: var(--mono);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
 main,
 .overlay-body {
   width: 100%;
@@ -95,13 +106,11 @@ h1 {
 .location-status,
 .input-status,
 .trip-meta,
-.trip-counts,
 .section-label,
 .entry-meta,
 .entry-location,
 .field-label,
 .field-helper,
-.sort-control,
 .day-label,
 .day-places {
   font-family: var(--mono);
@@ -112,13 +121,11 @@ h1 {
 .stats,
 .location-status,
 .input-status,
-.trip-counts,
 .section-label,
 .entry-meta,
 .entry-location,
 .field-label,
 .field-helper,
-.sort-control,
 .day-label,
 .day-places {
   color: var(--ink-light);
@@ -169,46 +176,6 @@ h1 {
   min-height: 18px;
   margin-top: 4px;
   line-height: 1.35;
-}
-
-.nav {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0;
-  margin-bottom: 14px;
-}
-
-.nav-item {
-  margin-right: 18px;
-  padding: 6px 0;
-  color: var(--ink-light);
-  font-size: 14px;
-  transition: color 0.15s;
-  white-space: nowrap;
-}
-
-.nav-item:hover {
-  color: var(--ink-mid);
-}
-
-.nav-item.active {
-  color: var(--ink);
-}
-
-.sort-row {
-  display: flex;
-  justify-content: flex-end;
-  margin-bottom: 8px;
-}
-
-.sort-control {
-  padding: 4px 0;
-  user-select: none;
-  transition: color 0.15s;
-}
-
-.sort-control:hover {
-  color: var(--ink-mid);
 }
 
 .trip-item,
@@ -394,14 +361,14 @@ h1 {
   display: inline-block;
   margin-bottom: 16px;
   padding: 12px 16px 12px 0;
-  color: var(--ink-light);
-  font-size: 15px;
+  color: var(--link);
+  font-size: 10.5px;
   transition: color 0.15s;
   user-select: none;
 }
 
 .back-btn:hover {
-  color: var(--ink);
+  color: var(--link);
 }
 
 .trip-head-dates {
@@ -423,8 +390,24 @@ h1 {
 }
 
 .trip-head-title {
-  margin-bottom: 10px;
+  margin-bottom: 0;
   font-size: 30px;
+}
+
+.trip-title-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 18px;
+  margin-bottom: 10px;
+}
+
+.trip-title-row .trip-head-title {
+  min-width: 0;
+}
+
+.title-action {
+  flex: 0 0 auto;
 }
 
 .screen-title {
@@ -451,25 +434,45 @@ h1 {
   margin-bottom: 20px;
 }
 
+.delete-action-row {
+  align-items: flex-start;
+}
+
+.journal-action-row {
+  margin: 14px 0 0;
+  padding: 3px 0;
+  border-top: 1px solid var(--rule);
+}
+
 .action-link {
   display: inline-block;
   padding: 10px 0;
-  color: var(--red);
-  font-size: 15px;
+  color: var(--link);
+  font-size: 10.5px;
   transition: color 0.15s;
   user-select: none;
 }
 
 .action-link:hover {
+  color: var(--link-light);
+}
+
+.action-link.muted,
+.action-link.secondary {
+  color: var(--link-muted);
+}
+
+.action-link.muted:hover,
+.action-link.secondary:hover {
+  color: var(--link);
+}
+
+.action-link.destructive {
+  color: var(--red);
+}
+
+.action-link.destructive:hover {
   color: var(--red-light);
-}
-
-.action-link.muted {
-  color: var(--ink-light);
-}
-
-.action-link.muted:hover {
-  color: var(--ink-mid);
 }
 
 .detail-rule {
@@ -484,7 +487,7 @@ h1 {
 }
 
 .day-group {
-  padding-top: 18px;
+  padding-top: 0;
 }
 
 .day-header {
@@ -492,9 +495,13 @@ h1 {
   justify-content: space-between;
   align-items: baseline;
   gap: 12px;
-  margin-top: 4px;
+  margin-top: 0;
   padding: 12px 0 4px;
   border-top: 1px solid var(--rule);
+}
+
+.day-header .day-label:only-child {
+  width: 100%;
 }
 
 .day-label,
@@ -539,10 +546,6 @@ h1 {
   align-items: baseline;
   gap: 10px;
   margin-bottom: 6px;
-}
-
-.entry-meta .type {
-  color: var(--ink-mid);
 }
 
 .entry-body,
@@ -620,13 +623,13 @@ h1 {
 }
 
 .inline-link {
-  color: var(--red);
-  font-size: 14px;
+  color: var(--link);
+  font-size: 10.5px;
   transition: color 0.15s;
 }
 
 .inline-link:hover {
-  color: var(--red-light);
+  color: var(--link-light);
 }
 
 .location-edit-form {
@@ -636,6 +639,24 @@ h1 {
 .action-row.compact {
   margin-top: 10px;
   margin-bottom: 0;
+}
+
+.delete-action-cluster {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
+}
+
+.delete-confirm-row {
+  display: flex;
+  gap: 16px;
+  align-items: baseline;
+  margin-top: -8px;
+}
+
+.delete-confirm-row .action-link {
+  padding-top: 0;
+  padding-bottom: 4px;
 }
 
 .field-row {

@@ -1,5 +1,4 @@
 import {
-  citiesToInput,
   createJournalEntry,
   createTrip,
   daysBetween,
@@ -9,7 +8,6 @@ import {
   isTripPast,
   normalizeEntry,
   normalizeTrip,
-  parseCitiesInput,
   toDateTimeInputValue,
   tripEntryCounts,
   visibleEntries,
@@ -17,7 +15,6 @@ import {
 } from "./model.js";
 import { loadAppState, saveAppState } from "./storage.js";
 
-const SORT_MODES = ["recent", "oldest", "duration"];
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const TILE_LAYER_URL = "https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png";
@@ -38,17 +35,18 @@ const MARKER_STYLE = {
 const loadedState = loadAppState();
 const state = {
   ...loadedState,
-  filter: "all",
-  sort: "recent",
   search: "",
   currentTripId: null,
   currentEntryId: null,
   composeEntryId: null,
   editingTripId: null,
+  pendingDeleteEntryId: null,
+  pendingDeleteTripId: null,
   isChangingEntryLocation: false,
   entryLocationDraft: null,
   entryLocationQuery: "",
   entryLocationError: "",
+  entryFormDraft: null,
   geolocationStatus: "checking",
   geolocationMessage: "checking location...",
   lastPosition: null
@@ -145,7 +143,7 @@ function refreshCurrentPosition(options = {}) {
         capturedAt
       };
       setGeolocationStatus("enabled", `location enabled | +/- ${Math.round(position.coords.accuracy)}m`);
-      requestAnimationFrame(renderComposeMap);
+      refreshComposeLocationView();
       resolve(state.lastPosition);
     }, error => {
       const status = error.code === error.PERMISSION_DENIED ? "denied" : "error";
@@ -153,7 +151,7 @@ function refreshCurrentPosition(options = {}) {
         ? "location denied; entries will save without coordinates"
         : "location not available; entries will save without coordinates";
       setGeolocationStatus(status, message);
-      requestAnimationFrame(renderComposeMap);
+      refreshComposeLocationView();
       resolve(null);
     }, {
       enableHighAccuracy: true,
@@ -161,6 +159,16 @@ function refreshCurrentPosition(options = {}) {
       maximumAge: 60000
     });
   });
+}
+
+function refreshComposeLocationView() {
+  if ($("compose-overlay")?.classList.contains("active")) {
+    captureEntryFormDraft();
+    renderCompose();
+    return;
+  }
+
+  requestAnimationFrame(renderComposeMap);
 }
 
 async function positionForNewEntry() {
@@ -282,10 +290,7 @@ function dayKey(iso) {
 }
 
 function routeCities(trip) {
-  return uniqueLabels([
-    ...trip.cities,
-    ...entriesForTrip(state.entries, trip.id).map(entryRouteLabel).filter(Boolean)
-  ]);
+  return uniqueLabels(entriesForTrip(state.entries, trip.id).map(entryRouteLabel).filter(Boolean));
 }
 
 function routeLabel(trip) {
@@ -332,7 +337,16 @@ function entryLocationLabel(entry) {
   if (hasGeotag(entry)) return `${entry.lat.toFixed(5)}, ${entry.lng.toFixed(5)}`;
   if (entry.geotagStatus === "denied") return "location denied";
   if (entry.geotagStatus === "unavailable" || entry.geotagStatus === "error") return "location unavailable";
-  return "no location";
+  return "";
+}
+
+function entryMetaLine(entry, options = {}) {
+  const parts = [];
+  if (options.includeDate) parts.push(formatDate(entry.timestamp.slice(0, 10)));
+  parts.push(formatTime(entry.timestamp));
+  const location = options.shortLocation ? entryRouteLabel(entry) : entryLocationLabel(entry);
+  if (location) parts.push(location);
+  return parts.filter(Boolean).join(" | ");
 }
 
 function currentPositionLabel() {
@@ -534,22 +548,12 @@ function renderComposeMap() {
 function filteredTrips() {
   const query = state.search.trim().toLowerCase();
   const list = visibleTrips(state.trips).filter(trip => {
-    if (state.filter === "active" && !isTripActive(trip)) return false;
-    if (state.filter === "past" && !isTripPast(trip)) return false;
     if (!query) return true;
-    const haystack = `${trip.title} ${trip.cities.join(" ")}`.toLowerCase();
+    const haystack = `${trip.title} ${routeCities(trip).join(" ")}`.toLowerCase();
     return haystack.includes(query);
   });
 
-  if (state.sort === "recent") {
-    list.sort((left, right) => new Date(`${right.startIso}T00:00:00`) - new Date(`${left.startIso}T00:00:00`));
-  } else if (state.sort === "oldest") {
-    list.sort((left, right) => new Date(`${left.startIso}T00:00:00`) - new Date(`${right.startIso}T00:00:00`));
-  } else if (state.sort === "duration") {
-    list.sort((left, right) => daysBetween(right.startIso, right.endIso) - daysBetween(left.startIso, left.endIso));
-  }
-
-  return list;
+  return list.sort((left, right) => new Date(`${right.startIso}T00:00:00`) - new Date(`${left.startIso}T00:00:00`));
 }
 
 function renderStats() {
@@ -561,16 +565,6 @@ function renderStats() {
   }
 
   $("stats").textContent = `${plural(trips.length, "trip")} | ${plural(entries.length, "entry", "entries")} | ${plural(cities.size, "city", "cities")}`;
-}
-
-function renderNav() {
-  $("nav").querySelectorAll(".nav-item").forEach(item => {
-    item.classList.toggle("active", item.dataset.filter === state.filter);
-  });
-}
-
-function renderSort() {
-  $("sort-control").textContent = state.sort;
 }
 
 function renderList() {
@@ -595,12 +589,11 @@ function renderList() {
     return `
       <article class="trip-item ${past ? "past" : ""}" data-trip-id="${esc(trip.id)}">
         <div class="trip-meta">
-          <span>${esc(formatDateRange(trip.startIso, trip.endIso))} | ${plural(days, "day").toUpperCase()}</span>
+          <span>${esc(formatDateRange(trip.startIso, trip.endIso))} | ${plural(days, "day").toUpperCase()} | ${esc(plural(counts.total, "entry", "entries").toUpperCase())}</span>
           <span class="right">${esc(active ? "NOW" : statusLabel(trip))}</span>
         </div>
         <h2 class="trip-title">${esc(trip.title)}</h2>
         <div class="trip-route">${esc(routeLabel(trip))}</div>
-        <div class="trip-counts">${esc(plural(counts.total, "entry", "entries"))}</div>
       </article>
     `;
   }).join("");
@@ -609,8 +602,6 @@ function renderList() {
 function renderAll() {
   renderLocationStatus();
   renderStats();
-  renderNav();
-  renderSort();
   renderList();
 }
 
@@ -639,21 +630,21 @@ function renderTrip() {
 
   $("trip-body").innerHTML = `
     <div class="map-panel"><div class="map-canvas" id="trip-map"></div></div>
-    <button class="back-btn" data-action="trip-back" type="button">Back to trips</button>
+    <button class="back-btn" data-action="trip-back" type="button">BACK</button>
     <div class="trip-head-dates">
-      <span>${esc(formatDateRange(trip.startIso, trip.endIso).toUpperCase())} | ${plural(days, "day").toUpperCase()}</span>
+      <span>${esc(formatDateRange(trip.startIso, trip.endIso).toUpperCase())} | ${plural(days, "day").toUpperCase()} | ${esc(plural(counts.total, "entry", "entries").toUpperCase())}</span>
       <span>${esc(statusLabel(trip))}</span>
     </div>
-    <h2 class="trip-head-title">${esc(trip.title)}</h2>
+    <div class="trip-title-row">
+      <h2 class="trip-head-title">${esc(trip.title)}</h2>
+      <button class="action-link title-action" data-action="edit-trip" type="button">EDIT</button>
+    </div>
     <div class="trip-head-route">${esc(routeLabel(trip))}</div>
 
-    <div class="action-row">
-      <button class="action-link" data-action="compose-journal" type="button">+ Journal</button>
-      <button class="action-link muted" data-action="edit-trip" type="button">Edit trip</button>
+    <div class="action-row journal-action-row">
+      <button class="action-link" data-action="compose-journal" type="button">+ JOURNAL</button>
     </div>
 
-    <hr class="detail-rule">
-    <div class="section-label">Timeline | ${esc(plural(counts.total, "entry", "entries"))}</div>
     <div id="timeline">${entries.length ? renderTimeline(entries) : '<div class="empty-state">no entries yet.</div>'}</div>
   `;
 
@@ -670,12 +661,12 @@ function renderTimeline(entries) {
 
   return Array.from(groups.values()).map(dayEntries => {
     const first = dayEntries[0];
-    const places = Array.from(new Set(dayEntries.filter(hasGeotag).map(entry => entryLocationLabel(entry))));
+    const places = uniqueLabels(dayEntries.map(entryRouteLabel).filter(Boolean));
     return `
       <section class="day-group">
         <div class="day-header">
           <span class="day-label">${esc(formatDayLabel(first.timestamp))}</span>
-          <span class="day-places">${esc(places.join(" | "))}</span>
+          ${places.length ? `<span class="day-places">${esc(places.join(" | "))}</span>` : ""}
         </div>
         ${dayEntries.map(renderEntryItem).join("")}
       </section>
@@ -685,12 +676,10 @@ function renderTimeline(entries) {
 
 function renderEntryItem(entry) {
   const paragraphs = bodyParagraphs(entry.body);
-  const location = entryLocationLabel(entry);
   return `
     <article class="entry" data-entry-id="${esc(entry.id)}">
       <div class="entry-meta">
-        <span><span class="type">JOURNAL</span> | ${esc(formatTime(entry.timestamp))} | ${esc(location)}</span>
-        <span>you</span>
+        <span>${esc(entryMetaLine(entry, { shortLocation: true }))}</span>
       </div>
       <div class="entry-body">
         ${entry.title ? `<p class="entry-summary-title">${esc(entry.title)}</p>` : ""}
@@ -723,6 +712,7 @@ function closeEntry() {
   entryMap = destroyMap(entryMap);
   closeOverlay("entry-overlay");
   state.currentEntryId = null;
+  state.pendingDeleteEntryId = null;
 }
 
 function renderEntry() {
@@ -732,18 +722,25 @@ function renderEntry() {
 
   $("entry-body").innerHTML = `
     ${hasGeotag(entry) ? '<div class="map-panel compact"><div class="map-canvas" id="entry-map"></div></div>' : ""}
-    <button class="back-btn" data-action="entry-back" type="button">Back to ${esc(trip?.title || "trip")}</button>
+    <button class="back-btn" data-action="entry-back" type="button">BACK</button>
     <div class="entry-meta">
-      <span>JOURNAL | ${esc(formatDate(entry.timestamp.slice(0, 10)))} | ${esc(formatTime(entry.timestamp))}</span>
-      <span>you</span>
+      <span>${esc(entryMetaLine(entry, { includeDate: true }))}</span>
     </div>
-    <div class="entry-location">${esc(entryLocationLabel(entry))}${entry.locationAccuracy ? ` | +/- ${esc(Math.round(entry.locationAccuracy))}m` : ""}</div>
+    ${entryLocationLabel(entry) ? `<div class="entry-location">${esc(entryLocationLabel(entry))}${entry.locationAccuracy ? ` | +/- ${esc(Math.round(entry.locationAccuracy))}m` : ""}</div>` : ""}
     ${entry.title ? `<h2 class="entry-detail-title">${esc(entry.title)}</h2>` : ""}
     <div class="entry-detail-content">${bodyParagraphs(entry.body)}</div>
     <hr class="detail-rule">
-    <div class="action-row">
-      <button class="action-link" data-action="edit-entry" type="button">Edit</button>
-      <button class="action-link muted" data-action="delete-entry" type="button">Delete</button>
+    <div class="action-row delete-action-row">
+      <button class="action-link" data-action="edit-entry" type="button">EDIT</button>
+      <div class="delete-action-cluster">
+        <button class="action-link destructive" data-action="delete-entry" type="button">DELETE</button>
+        ${state.pendingDeleteEntryId === entry.id ? `
+          <div class="delete-confirm-row">
+            <button class="action-link destructive" data-action="confirm-delete-entry" type="button">OK</button>
+            <button class="action-link secondary" data-action="cancel-delete-entry" type="button">CANCEL</button>
+          </div>
+        ` : ""}
+      </div>
     </div>
   `;
 
@@ -758,6 +755,7 @@ function openCompose(entryId = "") {
   state.entryLocationDraft = null;
   state.entryLocationQuery = "";
   state.entryLocationError = "";
+  state.entryFormDraft = null;
   renderCompose();
   openOverlay("compose-overlay");
   requestAnimationFrame(() => $("entry-body-input")?.focus());
@@ -771,6 +769,27 @@ function closeCompose() {
   state.entryLocationDraft = null;
   state.entryLocationQuery = "";
   state.entryLocationError = "";
+  state.entryFormDraft = null;
+}
+
+function captureEntryFormDraft() {
+  const titleInput = $("entry-title-input");
+  const bodyInput = $("entry-body-input");
+  const timeInput = $("entry-time-input");
+  if (!titleInput && !bodyInput && !timeInput) return;
+
+  state.entryFormDraft = {
+    title: titleInput?.value || "",
+    body: bodyInput?.value || "",
+    timestampInput: timeInput?.value || ""
+  };
+}
+
+function entryFormValue(entry, field, fallback = "") {
+  if (state.entryFormDraft && Object.hasOwn(state.entryFormDraft, field)) {
+    return state.entryFormDraft[field];
+  }
+  return fallback;
 }
 
 function renderLocationField(entry, label) {
@@ -785,15 +804,15 @@ function renderLocationField(entry, label) {
     <div class="field">
       <div class="field-label-row">
         <span class="field-label">Location</span>
-        ${canChange && !changing ? '<button class="inline-link" data-action="change-entry-location" type="button">change</button>' : ""}
+        ${canChange && !changing ? '<button class="inline-link" data-action="change-entry-location" type="button">CHANGE</button>' : ""}
       </div>
       <span class="field-helper ${state.entryLocationError ? "accent" : ""}">${esc(helper)}</span>
       ${changing ? `
         <div class="location-edit-form">
           <input class="field-input" id="location-query-input" value="${esc(query)}" placeholder="address, place, or city" autocomplete="street-address">
           <div class="action-row compact">
-            <button class="action-link" data-action="geocode-entry-location" type="button">Find</button>
-            <button class="action-link muted" data-action="cancel-location-change" type="button">Cancel</button>
+            <button class="action-link" data-action="geocode-entry-location" type="button">FIND</button>
+            <button class="action-link secondary" data-action="cancel-location-change" type="button">CANCEL</button>
           </div>
         </div>
       ` : ""}
@@ -811,30 +830,30 @@ function renderCompose() {
 
   $("compose-body").innerHTML = `
     <div class="map-panel compact"><div class="map-canvas" id="compose-location-map"></div></div>
-    <button class="back-btn" data-action="compose-back" type="button">Back</button>
+    <button class="back-btn" data-action="compose-back" type="button">BACK</button>
     <h2 class="screen-title">${esc(title)}</h2>
     <div class="trip-route" style="margin-bottom:20px;">in <em>${esc(trip?.title || "")}</em></div>
 
     <label class="field">
       <span class="field-label">Title optional</span>
-      <input class="field-input" id="entry-title-input" value="${esc(entry?.title || "")}" placeholder="a thought, a place, a moment" autocomplete="off">
+      <input class="field-input" id="entry-title-input" value="${esc(entryFormValue(entry, "title", entry?.title || ""))}" placeholder="a thought, a place, a moment" autocomplete="off">
     </label>
 
     <label class="field">
       <span class="field-label">Body</span>
-      <textarea class="field-textarea" id="entry-body-input" placeholder="write...">${esc(entry?.body || "")}</textarea>
+      <textarea class="field-textarea" id="entry-body-input" placeholder="write...">${esc(entryFormValue(entry, "body", entry?.body || ""))}</textarea>
     </label>
 
     <label class="field">
       <span class="field-label">When</span>
-      <input class="field-input" id="entry-time-input" type="datetime-local" value="${esc(toDateTimeInputValue(entry?.timestamp || new Date().toISOString()))}">
+      <input class="field-input" id="entry-time-input" type="datetime-local" value="${esc(entryFormValue(entry, "timestampInput", toDateTimeInputValue(entry?.timestamp || new Date().toISOString())))}">
     </label>
 
     ${renderLocationField(entry, locationLabel)}
 
     <div class="action-row">
-      <button class="action-link" data-action="save-entry" type="button">Save</button>
-      <button class="action-link muted" data-action="compose-back" type="button">Cancel</button>
+      <button class="action-link" data-action="save-entry" type="button">SAVE</button>
+      <button class="action-link secondary" data-action="compose-back" type="button">CANCEL</button>
     </div>
   `;
 
@@ -842,6 +861,7 @@ function renderCompose() {
 }
 
 async function geocodeEntryLocationFromForm() {
+  captureEntryFormDraft();
   const input = $("location-query-input");
   const query = input?.value || "";
   state.entryLocationQuery = query;
@@ -929,7 +949,6 @@ async function saveEntryFromForm() {
 function deleteCurrentEntry() {
   const entry = getEntry(state.currentEntryId);
   if (!entry) return;
-  if (!globalThis.confirm("Delete this entry?")) return;
 
   const index = state.entries.findIndex(candidate => candidate.id === entry.id);
   if (index >= 0) {
@@ -941,6 +960,7 @@ function deleteCurrentEntry() {
   }
 
   save();
+  state.pendingDeleteEntryId = null;
   closeEntry();
   renderTrip();
   renderAll();
@@ -959,6 +979,7 @@ function openTripForm() {
 function closeTripForm() {
   closeOverlay("trip-form-overlay");
   state.editingTripId = null;
+  state.pendingDeleteTripId = null;
 }
 
 function renderTripForm() {
@@ -966,7 +987,7 @@ function renderTripForm() {
   if (!trip) return;
 
   $("trip-form-body").innerHTML = `
-    <button class="back-btn" data-action="trip-form-back" type="button">Back</button>
+    <button class="back-btn" data-action="trip-form-back" type="button">BACK</button>
     <h2 class="screen-title">Edit trip</h2>
 
     <label class="field">
@@ -985,16 +1006,18 @@ function renderTripForm() {
       </label>
     </div>
 
-    <label class="field">
-      <span class="field-label">Cities</span>
-      <input class="field-input" id="trip-cities-input" value="${esc(citiesToInput(trip.cities))}" placeholder="Venice, Split, Dubrovnik" autocomplete="off">
-      <span class="field-helper">Separate cities with commas.</span>
-    </label>
-
-    <div class="action-row">
-      <button class="action-link" data-action="save-trip" type="button">Save</button>
-      <button class="action-link muted" data-action="delete-trip" type="button">Delete trip</button>
-      <button class="action-link muted" data-action="trip-form-back" type="button">Cancel</button>
+    <div class="action-row delete-action-row">
+      <button class="action-link" data-action="save-trip" type="button">SAVE</button>
+      <div class="delete-action-cluster">
+        <button class="action-link destructive" data-action="delete-trip" type="button">DELETE</button>
+        ${state.pendingDeleteTripId === trip.id ? `
+          <div class="delete-confirm-row">
+            <button class="action-link destructive" data-action="confirm-delete-trip" type="button">OK</button>
+            <button class="action-link secondary" data-action="cancel-delete-trip" type="button">CANCEL</button>
+          </div>
+        ` : ""}
+      </div>
+      <button class="action-link secondary" data-action="trip-form-back" type="button">CANCEL</button>
     </div>
   `;
 }
@@ -1017,7 +1040,6 @@ function saveTripFromForm() {
     title,
     startIso: $("trip-start-input")?.value || trip.startIso,
     endIso: $("trip-end-input")?.value || trip.endIso,
-    cities: parseCitiesInput($("trip-cities-input")?.value || ""),
     dateUpdated: new Date().toISOString()
   });
 
@@ -1031,7 +1053,6 @@ function saveTripFromForm() {
 function deleteCurrentTrip() {
   const trip = getTrip(state.editingTripId);
   if (!trip) return;
-  if (!globalThis.confirm("Delete this trip and its entries?")) return;
 
   const now = new Date().toISOString();
   state.trips = state.trips.map(candidate => candidate.id === trip.id
@@ -1042,6 +1063,7 @@ function deleteCurrentTrip() {
     : entry);
 
   save();
+  state.pendingDeleteTripId = null;
   closeTripForm();
   closeTrip();
   renderAll();
@@ -1187,19 +1209,6 @@ function bindEvents() {
     }
   });
 
-  $("nav").addEventListener("click", event => {
-    const item = event.target.closest(".nav-item");
-    if (!item) return;
-    state.filter = item.dataset.filter;
-    renderAll();
-  });
-
-  $("sort-control").addEventListener("click", () => {
-    const index = SORT_MODES.indexOf(state.sort);
-    state.sort = SORT_MODES[(index + 1) % SORT_MODES.length];
-    renderAll();
-  });
-
   $("trip-list").addEventListener("click", event => {
     const item = event.target.closest(".trip-item");
     if (item) showTrip(item.dataset.tripId);
@@ -1227,7 +1236,15 @@ function bindEvents() {
       state.currentTripId = entry.tripId;
       return openCompose(entry.id);
     }
-    if (action.dataset.action === "delete-entry") return deleteCurrentEntry();
+    if (action.dataset.action === "delete-entry") {
+      state.pendingDeleteEntryId = state.currentEntryId;
+      return renderEntry();
+    }
+    if (action.dataset.action === "cancel-delete-entry") {
+      state.pendingDeleteEntryId = null;
+      return renderEntry();
+    }
+    if (action.dataset.action === "confirm-delete-entry") return deleteCurrentEntry();
   });
 
   $("compose-overlay").addEventListener("click", event => {
@@ -1235,6 +1252,7 @@ function bindEvents() {
     if (!action) return;
     if (action.dataset.action === "compose-back") return closeCompose();
     if (action.dataset.action === "change-entry-location") {
+      captureEntryFormDraft();
       state.isChangingEntryLocation = true;
       state.entryLocationError = "";
       renderCompose();
@@ -1242,6 +1260,7 @@ function bindEvents() {
       return;
     }
     if (action.dataset.action === "cancel-location-change") {
+      captureEntryFormDraft();
       state.isChangingEntryLocation = false;
       state.entryLocationError = "";
       renderCompose();
@@ -1275,7 +1294,15 @@ function bindEvents() {
     if (!action) return;
     if (action.dataset.action === "trip-form-back") return closeTripForm();
     if (action.dataset.action === "save-trip") return saveTripFromForm();
-    if (action.dataset.action === "delete-trip") return deleteCurrentTrip();
+    if (action.dataset.action === "delete-trip") {
+      state.pendingDeleteTripId = state.editingTripId;
+      return renderTripForm();
+    }
+    if (action.dataset.action === "cancel-delete-trip") {
+      state.pendingDeleteTripId = null;
+      return renderTripForm();
+    }
+    if (action.dataset.action === "confirm-delete-trip") return deleteCurrentTrip();
   });
 
   document.addEventListener("keydown", event => {
