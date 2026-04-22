@@ -6,7 +6,9 @@
     "dev": "concurrently -n web,sync -c auto \"npm:dev:app\" \"npm:dev:worker:sync\"",
     "dev:app": "python3 -m http.server 8030 --bind 0.0.0.0 --directory app",
     "dev:worker:sync": "WRANGLER_LOG_PATH=.wrangler/logs wrangler dev --cwd workers/sync --config wrangler.toml --ip 0.0.0.0 --port 8796 --inspector-ip 127.0.0.1 --inspector-port 9246 --persist-to ../../.wrangler/state/sync",
-    "check": "node --check app/config.js && node --check app/model.js && node --check app/storage.js && node --check app/sync.js && node --check app/photos.js && node --check app/main.js && node --check workers/sync/src/index.js && node --test test/*.test.js"
+    "deploy:worker:sync": "wrangler deploy --config workers/sync/wrangler.toml",
+    "deploy:workers": "npm run deploy:worker:sync",
+    "check": "node --check app/config.js && node --check app/version.js && node --check app/sw.js && node --check app/model.js && node --check app/storage.js && node --check app/sync.js && node --check app/photos.js && node --check app/main.js && node -e \"JSON.parse(require('node:fs').readFileSync('app/manifest.webmanifest', 'utf8'))\" && node --check workers/sync/src/index.js && node --test test/*.test.js"
   },
   "devDependencies": {
     "concurrently": "^9.2.1",

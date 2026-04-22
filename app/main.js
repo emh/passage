@@ -3491,6 +3491,88 @@ function init() {
   configureSync();
   handleIncomingQueries();
   initGeolocation();
+  registerServiceWorker();
+  watchForAppUpdates();
 }
 
 init();
+
+function isLocalHost() {
+  const host = globalThis.location?.hostname || "";
+  return host === "localhost" || host === "127.0.0.1";
+}
+
+function shouldUseServiceWorker() {
+  return "serviceWorker" in navigator && globalThis.location?.protocol === "https:" && !isLocalHost();
+}
+
+function registerServiceWorker() {
+  if (!shouldUseServiceWorker()) return;
+
+  let isReloadingForServiceWorker = false;
+  navigator.serviceWorker.addEventListener("controllerchange", () => {
+    if (isReloadingForServiceWorker) return;
+    isReloadingForServiceWorker = true;
+    globalThis.location.reload();
+  });
+
+  navigator.serviceWorker.register("./sw.js", { updateViaCache: "none" })
+    .then(registration => {
+      if (registration.waiting) {
+        registration.waiting.postMessage({ type: "SKIP_WAITING" });
+      }
+
+      registration.addEventListener("updatefound", () => {
+        const worker = registration.installing;
+        if (!worker) return;
+
+        worker.addEventListener("statechange", () => {
+          if (worker.state === "installed" && navigator.serviceWorker.controller) {
+            worker.postMessage({ type: "SKIP_WAITING" });
+          }
+        });
+      });
+
+      setInterval(() => {
+        registration.update().catch(() => {});
+      }, 60_000);
+    })
+    .catch(() => {});
+}
+
+function watchForAppUpdates() {
+  if (isLocalHost()) return;
+
+  let didReload = false;
+  const currentBuildId = globalThis.PASSAGE_BUILD_ID || "";
+
+  async function checkVersion() {
+    if (didReload || !currentBuildId) return;
+
+    try {
+      const versionUrl = new URL("./version.js", globalThis.location.href);
+      versionUrl.searchParams.set("t", Date.now().toString());
+      const response = await fetch(versionUrl, { cache: "no-store" });
+      if (!response.ok) return;
+
+      const nextBuildId = parseBuildId(await response.text());
+      if (!nextBuildId || nextBuildId === currentBuildId) return;
+
+      didReload = true;
+      const registration = await navigator.serviceWorker?.getRegistration?.();
+      await registration?.update?.().catch(() => {});
+      globalThis.location.reload();
+    } catch {
+      // Stay on the current version if the version check is unavailable.
+    }
+  }
+
+  setInterval(checkVersion, 60_000);
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) checkVersion();
+  });
+}
+
+function parseBuildId(scriptText) {
+  return scriptText.match(/PASSAGE_BUILD_ID\s*=\s*["']([^"']+)["']/)?.[1] || "";
+}
