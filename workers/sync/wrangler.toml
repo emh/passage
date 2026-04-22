@@ -13,3 +13,10 @@ new_sqlite_classes = ["PassageProfileRoom"]
 [[r2_buckets]]
 binding = "PASSAGE_PHOTOS"
 bucket_name = "passage-photos"
+
+[vars]
+MOCK_LLM = "false"
+OPENAI_MODEL = "gpt-5.4-nano"
+OPENAI_REASONING_EFFORT = "low"
+NOMINATIM_ENDPOINT = "https://nominatim.openstreetmap.org"
+NOMINATIM_USER_AGENT = "PassagePersonalApp/0.1"

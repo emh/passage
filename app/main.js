@@ -32,7 +32,7 @@ import {
 } from "./model.js";
 import { ensureSharedTripSyncState, loadAppState, loadSettings, saveAppState } from "./storage.js";
 import { ensurePhotoObjectUrl, getCachedPhotoUrl, getPhotoAsset, hasPhotoAsset, processPhotoFile, putPhotoAsset } from "./photos.js";
-import { createRemoteProfile, createRemoteTrip, fetchPhotoAsset, fetchRemoteProfile, fetchRemoteTrip, PassageSync, updateRemoteProfile, uploadPhotoAsset } from "./sync.js";
+import { createRemoteProfile, createRemoteTrip, fetchPhotoAsset, fetchRemoteProfile, fetchRemoteTrip, inspectEntryUrl, PassageSync, updateRemoteProfile, uploadPhotoAsset } from "./sync.js";
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
@@ -79,6 +79,12 @@ const state = {
   entryPhotoRemoved: false,
   entryPhotoError: "",
   entryPhotoNote: "",
+  entryUrlMetadataDraft: null,
+  entryUrlMetadataRemoved: false,
+  entryUrlMetadataStatus: "",
+  entryUrlMetadataError: "",
+  entryUrlMetadataLastUrl: "",
+  entryUrlMetadataRequestId: 0,
   composeInitialSnapshot: null,
   commentDraft: "",
   inlineCommentDrafts: new Map(),
@@ -113,6 +119,7 @@ const photoDownloads = new Set();
 const photoTransferStatus = new Map();
 const photoRetryTimers = new Map();
 let photoWorkScheduled = false;
+let entryUrlMetadataTimer = null;
 
 function esc(value) {
   const div = document.createElement("div");
@@ -644,6 +651,109 @@ function validEntryUrl(value) {
   } catch {
     return "";
   }
+}
+
+function validHttpEntryUrl(value) {
+  const url = validEntryUrl(value);
+  if (!url) return "";
+  try {
+    const parsed = new URL(url);
+    return ["http:", "https:"].includes(parsed.protocol) ? parsed.toString() : "";
+  } catch {
+    return "";
+  }
+}
+
+function entryUrlReadyForLookup(value) {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  if (!/^https?:\/\//i.test(text) && !text.includes(".")) return "";
+  return validHttpEntryUrl(text);
+}
+
+function sameEntryUrl(left, right) {
+  const a = validHttpEntryUrl(left);
+  const b = validHttpEntryUrl(right);
+  return Boolean(a && b && a === b);
+}
+
+function cleanPreviewText(value) {
+  return String(value || "").replace(/\s+/g, " ").trim();
+}
+
+function normalizePreviewImageUrl(value) {
+  const text = cleanPreviewText(value);
+  if (!text) return "";
+  try {
+    const url = new URL(text);
+    return ["http:", "https:"].includes(url.protocol) ? url.toString() : "";
+  } catch {
+    return "";
+  }
+}
+
+function normalizeLinkPreview(input = {}, fallbackUrl = "") {
+  const url = validHttpEntryUrl(input.url || fallbackUrl);
+  const preview = {
+    url,
+    title: cleanPreviewText(input.title),
+    description: cleanPreviewText(input.description),
+    imageUrl: normalizePreviewImageUrl(input.imageUrl)
+  };
+  return hasLinkPreview(preview) ? preview : null;
+}
+
+function hasLinkPreview(preview) {
+  return Boolean(preview?.title || preview?.description || preview?.imageUrl);
+}
+
+function entryLinkPreview(entry) {
+  if (!entry) return null;
+  return normalizeLinkPreview({
+    url: entry.url,
+    title: entry.linkPreviewTitle,
+    description: entry.linkPreviewDescription,
+    imageUrl: entry.linkPreviewImageUrl
+  }, entry.url);
+}
+
+function currentLinkPreview(entry, rawUrl = "") {
+  const url = validHttpEntryUrl(rawUrl || state.entryFormDraft?.url || entry?.url || "");
+  if (!url || state.entryUrlMetadataRemoved) return null;
+  if (state.entryUrlMetadataDraft && sameEntryUrl(state.entryUrlMetadataDraft.url, url)) {
+    return state.entryUrlMetadataDraft;
+  }
+
+  const existing = entryLinkPreview(entry);
+  if (existing && sameEntryUrl(existing.url, url)) return existing;
+  return null;
+}
+
+function linkPreviewFields(preview) {
+  return {
+    linkPreviewTitle: preview?.title || "",
+    linkPreviewDescription: preview?.description || "",
+    linkPreviewImageUrl: preview?.imageUrl || ""
+  };
+}
+
+function linkPreviewSignature(preview) {
+  if (!preview) return "";
+  return JSON.stringify({
+    title: preview.title || "",
+    description: preview.description || "",
+    imageUrl: preview.imageUrl || ""
+  });
+}
+
+function normalizeInspectedLinkPreview(payload, url) {
+  const metadata = payload?.metadata || {};
+  return normalizeLinkPreview({
+    url,
+    title: metadata.title,
+    description: metadata.description,
+    imageUrl: metadata.imageUrl
+  }, url);
 }
 
 function entryHasRequiredContent({ title = "", description = "", url = "", hasPhoto = false } = {}) {
@@ -2047,6 +2157,7 @@ function renderEntryItem(entry) {
         ${renderEntryPhoto(entry, "summary")}
         ${paragraphs}
         ${url ? `<a class="entry-link" href="${esc(url)}" target="_blank" rel="noreferrer">${esc(entryUrlLabel(url))}</a>` : ""}
+        ${renderEntryLinkPreview(entry, "summary")}
         ${renderEntryCommentSummary(entry)}
       </div>
     </article>
@@ -2217,6 +2328,7 @@ function renderEntry() {
     <div class="entry-detail-content">
       ${bodyParagraphs(entryDescription(entry))}
       ${entry.url ? `<a class="entry-link" href="${esc(entry.url)}" target="_blank" rel="noreferrer">${esc(entryUrlLabel(entry.url))}</a>` : ""}
+      ${renderEntryLinkPreview(entry, "detail")}
     </div>
     ${renderEntrySocial(entry)}
   `;
@@ -2411,11 +2523,15 @@ function openCompose(entryId = "") {
   state.entryPhotoRemoved = false;
   state.entryPhotoError = "";
   state.entryPhotoNote = "";
+  resetEntryUrlMetadataState(entry);
   state.composeInitialSnapshot = composeSnapshotFromEntry(entry);
   clearConfirmation("compose");
   renderCompose();
   openOverlay("compose-overlay");
   if (!entry) requestLocationForNewEntry();
+  if (entry?.url && !entryLinkPreview(entry)) {
+    lookupEntryUrlMetadata(entry.url, { force: true }).catch(() => {});
+  }
   requestAnimationFrame(() => $("entry-description-input")?.focus());
 }
 
@@ -2441,6 +2557,7 @@ function closeCompose() {
   state.entryPhotoRemoved = false;
   state.entryPhotoError = "";
   state.entryPhotoNote = "";
+  resetEntryUrlMetadataState(null);
   state.composeInitialSnapshot = null;
   clearConfirmation("compose");
 }
@@ -2473,6 +2590,7 @@ function composeSnapshotFromEntry(entry) {
     title: String(entry?.title || "").trim(),
     description: entryDescription(entry).trim(),
     url: String(entry?.url || "").trim(),
+    linkPreview: linkPreviewSignature(entryLinkPreview(entry)),
     timestampInput: toDateTimeInputValue(timestamp),
     location: locationSignature(entry),
     photoAssetId: entry?.photoAssetId || ""
@@ -2486,6 +2604,8 @@ function currentComposeSnapshot() {
   const title = String(state.entryFormDraft?.title || "").trim();
   const description = String(state.entryFormDraft?.description || "").trim();
   const url = String(state.entryFormDraft?.url || "").trim();
+  const entry = state.composeEntryId ? getEntry(state.composeEntryId) : null;
+  const linkPreview = linkPreviewSignature(currentLinkPreview(entry, url));
   const timestampInput = String(state.entryFormDraft?.timestampInput || initial.timestampInput || "").trim();
   const location = state.entryLocationDraft ? locationSignature(state.entryLocationDraft) : initial.location;
   const photoAssetId = state.entryPhotoRemoved
@@ -2496,6 +2616,7 @@ function currentComposeSnapshot() {
     title,
     description,
     url,
+    linkPreview,
     timestampInput,
     location,
     photoAssetId
@@ -2510,6 +2631,7 @@ function hasUnsavedComposeChanges() {
   return current.title !== initial.title ||
     current.description !== initial.description ||
     current.url !== initial.url ||
+    current.linkPreview !== initial.linkPreview ||
     current.timestampInput !== initial.timestampInput ||
     current.location !== initial.location ||
     current.photoAssetId !== initial.photoAssetId;
@@ -2554,6 +2676,206 @@ function renderLocationField(entry, label) {
       ` : ""}
     </div>
   `;
+}
+
+function clearEntryUrlMetadataTimer() {
+  clearTimeout(entryUrlMetadataTimer);
+  entryUrlMetadataTimer = null;
+}
+
+function resetEntryUrlMetadataState(entry = null) {
+  clearEntryUrlMetadataTimer();
+  state.entryUrlMetadataDraft = entryLinkPreview(entry);
+  state.entryUrlMetadataRemoved = false;
+  state.entryUrlMetadataStatus = "";
+  state.entryUrlMetadataError = "";
+  state.entryUrlMetadataLastUrl = entry?.url || "";
+  state.entryUrlMetadataRequestId += 1;
+}
+
+function refreshComposeAfterUrlMetadata() {
+  if (!$("compose-overlay")?.classList.contains("active")) return;
+  const activeId = $("compose-overlay").contains(document.activeElement) ? document.activeElement?.id : "";
+  renderCompose();
+  if (activeId) {
+    requestAnimationFrame(() => $(activeId)?.focus({ preventScroll: true }));
+  }
+}
+
+function handleEntryUrlInput(value) {
+  captureEntryFormDraft();
+  clearConfirmation("compose");
+  const url = entryUrlReadyForLookup(value);
+
+  if (!url) {
+    const hadMetadataState = Boolean(state.entryUrlMetadataDraft || state.entryUrlMetadataStatus || state.entryUrlMetadataError);
+    clearEntryUrlMetadataTimer();
+    state.entryUrlMetadataDraft = null;
+    state.entryUrlMetadataRemoved = false;
+    state.entryUrlMetadataStatus = "";
+    state.entryUrlMetadataError = "";
+    state.entryUrlMetadataLastUrl = "";
+    if (hadMetadataState) refreshComposeAfterUrlMetadata();
+    return;
+  }
+
+  if (!sameEntryUrl(state.entryUrlMetadataLastUrl, url)) {
+    state.entryUrlMetadataRemoved = false;
+    state.entryUrlMetadataError = "";
+    state.entryUrlMetadataStatus = "";
+    state.entryUrlMetadataLastUrl = url;
+    if (!sameEntryUrl(state.entryUrlMetadataDraft?.url, url)) {
+      state.entryUrlMetadataDraft = null;
+    }
+  }
+
+  clearEntryUrlMetadataTimer();
+  entryUrlMetadataTimer = setTimeout(() => {
+    lookupEntryUrlMetadata(url).catch(() => {});
+  }, 450);
+}
+
+async function lookupEntryUrlMetadata(value, options = {}) {
+  const url = validHttpEntryUrl(value);
+  if (!url || state.entryUrlMetadataRemoved) return null;
+
+  const entry = state.composeEntryId ? getEntry(state.composeEntryId) : null;
+  const existing = currentLinkPreview(entry, url);
+  if (!options.force && existing && sameEntryUrl(state.entryUrlMetadataLastUrl, url)) return existing;
+
+  clearEntryUrlMetadataTimer();
+  const requestId = state.entryUrlMetadataRequestId + 1;
+  state.entryUrlMetadataRequestId = requestId;
+  state.entryUrlMetadataStatus = "loading";
+  state.entryUrlMetadataError = "";
+  state.entryUrlMetadataLastUrl = url;
+  if (!existing || !sameEntryUrl(existing.url, url)) state.entryUrlMetadataDraft = null;
+  if (!options.quiet) refreshComposeAfterUrlMetadata();
+
+  try {
+    const payload = await inspectEntryUrl(url, state.settings);
+    if (requestId !== state.entryUrlMetadataRequestId) return null;
+
+    const preview = normalizeInspectedLinkPreview(payload, url);
+    state.entryUrlMetadataDraft = preview;
+    state.entryUrlMetadataRemoved = false;
+    state.entryUrlMetadataStatus = preview ? "ready" : "empty";
+    applyPlaceLocationFromUrlInspection(payload, url);
+    if (!options.quiet) refreshComposeAfterUrlMetadata();
+    return preview;
+  } catch (error) {
+    if (requestId !== state.entryUrlMetadataRequestId) return null;
+    state.entryUrlMetadataStatus = "error";
+    state.entryUrlMetadataError = error instanceof Error ? error.message : "URL could not be read";
+    if (!options.quiet) refreshComposeAfterUrlMetadata();
+    return null;
+  }
+}
+
+async function ensureEntryUrlMetadataForSave(value, entry) {
+  const url = validHttpEntryUrl(value);
+  if (!url || state.entryUrlMetadataRemoved || currentLinkPreview(entry, url)) return;
+  await lookupEntryUrlMetadata(url, { force: true, quiet: true });
+}
+
+function applyPlaceLocationFromUrlInspection(payload, url) {
+  const location = locationDraftFromInspectedPlace(payload?.place);
+  if (!location || !shouldApplyUrlPlaceLocation(url)) return;
+
+  state.entryLocationDraft = location;
+  state.entryLocationQuery = location.locationQuery;
+  state.entryLocationError = "";
+  state.isChangingEntryLocation = false;
+}
+
+function shouldApplyUrlPlaceLocation(url) {
+  if (state.isChangingEntryLocation || state.entryLocationDraft) return false;
+  const entry = state.composeEntryId ? getEntry(state.composeEntryId) : null;
+  if (!entry) return true;
+  if (!sameEntryUrl(url, entry.url)) return true;
+  return !entryLocationLabel(entry);
+}
+
+function locationDraftFromInspectedPlace(place) {
+  if (!place?.isRelevantPlace) return null;
+
+  const lat = geoNumberFromValue(place.lat);
+  const lng = geoNumberFromValue(place.lng);
+  const name = cleanPreviewText(place.name);
+  const address = cleanPreviewText(place.address);
+  const city = cleanPreviewText(place.city);
+  const region = cleanPreviewText(place.state);
+  const country = cleanPreviewText(place.country);
+  const display = [name, address].filter(Boolean).join(" | ") || address || name || city;
+  const query = address || name || city || display;
+
+  if (!query && (!Number.isFinite(lat) || !Number.isFinite(lng))) return null;
+
+  return {
+    lat: Number.isFinite(lat) ? lat : null,
+    lng: Number.isFinite(lng) ? lng : null,
+    locationQuery: query,
+    locationDisplayName: display || (Number.isFinite(lat) && Number.isFinite(lng) ? `${lat.toFixed(5)}, ${lng.toFixed(5)}` : ""),
+    locationCity: city,
+    locationRegion: region,
+    locationCountry: country,
+    locationAccuracy: null,
+    geotaggedAt: new Date().toISOString(),
+    geotagStatus: "ready"
+  };
+}
+
+function geoNumberFromValue(value) {
+  if (value == null || String(value).trim() === "") return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function renderUrlField(entry) {
+  const value = entryFormValue(entry, "url", entry?.url || "");
+  const preview = currentLinkPreview(entry, value);
+  const helper = state.entryUrlMetadataError ||
+    (state.entryUrlMetadataStatus === "loading" ? "reading URL..." : "") ||
+    (state.entryUrlMetadataStatus === "empty" ? "no sharing preview found" : "") ||
+    (preview ? "" : "optional");
+
+  return `
+    <div class="field">
+      <div class="field-label-row">
+        <span class="field-label">URL</span>
+        ${preview ? '<button class="inline-link" data-action="remove-entry-url-metadata" type="button">REMOVE PREVIEW</button>' : ""}
+      </div>
+      <input class="field-input" id="entry-url-input" value="${esc(value)}" placeholder="https://example.com" autocomplete="url">
+      ${preview ? renderLinkPreview(preview, { mode: "form" }) : ""}
+      ${helper ? `<span class="field-helper ${state.entryUrlMetadataError ? "accent" : ""}">${esc(helper)}</span>` : ""}
+    </div>
+  `;
+}
+
+function renderLinkPreview(preview, options = {}) {
+  if (!hasLinkPreview(preview)) return "";
+  const mode = options.mode || "summary";
+  const image = preview.imageUrl
+    ? `<img class="link-preview-image" src="${esc(preview.imageUrl)}" alt="${esc(preview.title || "link preview")}">`
+    : "";
+  const body = `
+    ${image ? `<div class="link-preview-media">${image}</div>` : ""}
+    <div class="link-preview-copy">
+      ${preview.title ? `<div class="link-preview-title">${esc(preview.title)}</div>` : ""}
+      ${preview.description ? `<div class="link-preview-description">${esc(preview.description)}</div>` : ""}
+    </div>
+  `;
+
+  const classes = `link-preview ${mode}${preview.imageUrl ? " has-image" : ""}`;
+  return options.href
+    ? `<a class="${esc(classes)}" href="${esc(options.href)}" target="_blank" rel="noreferrer">${body}</a>`
+    : `<div class="${esc(classes)}">${body}</div>`;
+}
+
+function renderEntryLinkPreview(entry, mode = "summary") {
+  const preview = entryLinkPreview(entry);
+  if (!preview || !entry?.url) return "";
+  return renderLinkPreview(preview, { mode, href: entry.url });
 }
 
 function renderPhotoField(entry) {
@@ -2623,10 +2945,7 @@ function renderCompose() {
       <textarea class="field-textarea" id="entry-description-input" placeholder="write...">${esc(entryFormValue(entry, "description", entryDescription(entry)))}</textarea>
     </label>
 
-    <label class="field">
-      <span class="field-label">URL</span>
-      <input class="field-input" id="entry-url-input" value="${esc(entryFormValue(entry, "url", entry?.url || ""))}" placeholder="https://example.com" autocomplete="url">
-    </label>
+    ${renderUrlField(entry)}
 
     ${renderPhotoField(entry)}
 
@@ -2734,11 +3053,14 @@ async function saveEntryFromForm() {
     return;
   }
 
+  await ensureEntryUrlMetadataForSave(url, currentEntry);
+  const linkPreview = currentLinkPreview(currentEntry, url);
   const fields = {
     title,
     description,
     body: description,
     url,
+    ...linkPreviewFields(linkPreview),
     timestamp: fromDateTimeInputValue($("entry-time-input")?.value || ""),
     dateUpdated: new Date().toISOString()
   };
@@ -3429,6 +3751,18 @@ function bindEvents() {
       renderCompose();
       return;
     }
+    if (action.dataset.action === "remove-entry-url-metadata") {
+      captureEntryFormDraft();
+      clearEntryUrlMetadataTimer();
+      clearConfirmation("compose");
+      state.entryUrlMetadataDraft = null;
+      state.entryUrlMetadataRemoved = true;
+      state.entryUrlMetadataStatus = "";
+      state.entryUrlMetadataError = "";
+      renderCompose();
+      requestAnimationFrame(() => $("entry-url-input")?.focus({ preventScroll: true }));
+      return;
+    }
     if (action.dataset.action === "geocode-entry-location") {
       geocodeEntryLocationFromForm().catch(error => {
         state.entryLocationError = error instanceof Error ? error.message : "location not found";
@@ -3445,6 +3779,12 @@ function bindEvents() {
     if (action.dataset.action === "delete-entry") {
       if (!state.composeEntryId) return;
       return openConfirmation("compose", "Are you sure?", "delete-entry", state.composeEntryId);
+    }
+  });
+
+  $("compose-overlay").addEventListener("input", event => {
+    if (event.target?.id === "entry-url-input") {
+      handleEntryUrlInput(event.target.value);
     }
   });
 

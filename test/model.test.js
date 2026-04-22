@@ -152,6 +152,9 @@ test("entries keep legacy body text as description and normalize photo metadata"
     tripId: "trip-1",
     body: "First morning in town.",
     url: "example.com/path",
+    linkPreviewTitle: " Example title ",
+    linkPreviewDescription: " Shared\nsummary ",
+    linkPreviewImageUrl: "https://example.com/card.jpg",
     photoAssetId: "photo-1",
     photoMime: "image/jpeg",
     photoWidth: 1600,
@@ -163,6 +166,9 @@ test("entries keep legacy body text as description and normalize photo metadata"
   assert.equal(entry.description, "First morning in town.");
   assert.equal(entry.body, "First morning in town.");
   assert.equal(entry.url, "https://example.com/path");
+  assert.equal(entry.linkPreviewTitle, "Example title");
+  assert.equal(entry.linkPreviewDescription, "Shared\nsummary");
+  assert.equal(entry.linkPreviewImageUrl, "https://example.com/card.jpg");
   assert.equal(entry.photoAssetId, "photo-1");
   assert.equal(entry.photoWidth, 1600);
 });

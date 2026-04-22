@@ -11,7 +11,7 @@ import {
 } from "./model.js";
 
 export const STATE_STORAGE_KEY = "passage_v1";
-export const SCHEMA_VERSION = 5;
+export const SCHEMA_VERSION = 6;
 
 export function createInitialState() {
   return {

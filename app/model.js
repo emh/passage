@@ -19,6 +19,9 @@ export const ENTRY_FIELDS = [
   "description",
   "body",
   "url",
+  "linkPreviewTitle",
+  "linkPreviewDescription",
+  "linkPreviewImageUrl",
   "photoAssetId",
   "photoMime",
   "photoWidth",
@@ -224,6 +227,9 @@ export function normalizeEntry(input = {}) {
     description,
     body: description,
     url: normalizeEntryUrl(input.url),
+    linkPreviewTitle: cleanSingleLine(input.linkPreviewTitle),
+    linkPreviewDescription: cleanText(input.linkPreviewDescription),
+    linkPreviewImageUrl: normalizeAbsoluteHttpUrl(input.linkPreviewImageUrl),
     photoAssetId: cleanSingleLine(input.photoAssetId),
     photoMime: normalizePhotoMime(input.photoMime),
     photoWidth: positiveIntegerOrNull(input.photoWidth),
@@ -634,6 +640,17 @@ function normalizeEntryUrl(value) {
   return `https://${text}`;
 }
 
+function normalizeAbsoluteHttpUrl(value) {
+  const text = cleanSingleLine(value);
+  if (!text) return "";
+  try {
+    const url = new URL(text);
+    return ["http:", "https:"].includes(url.protocol) ? url.toString() : "";
+  } catch {
+    return "";
+  }
+}
+
 function normalizePhotoMime(value) {
   const text = cleanSingleLine(value).toLowerCase();
   return text.startsWith("image/") ? text : "";
@@ -661,6 +678,8 @@ function coerceEntryField(field, value) {
   if (field === "type") return "entry";
   if (field === "body" || field === "description") return cleanText(value);
   if (field === "url") return normalizeEntryUrl(value);
+  if (field === "linkPreviewDescription") return cleanText(value);
+  if (field === "linkPreviewImageUrl") return normalizeAbsoluteHttpUrl(value);
   if (field === "photoMime") return normalizePhotoMime(value);
   if (field === "photoWidth" || field === "photoHeight" || field === "photoSize") return positiveIntegerOrNull(value);
   if (field === "photoAssetId") return cleanSingleLine(value);

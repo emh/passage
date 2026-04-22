@@ -1,0 +1,11 @@
+# Set false to use OpenAI for place extraction from entry URLs.
+MOCK_LLM="true"
+
+# Used when MOCK_LLM is false.
+OPENAI_API_KEY=""
+OPENAI_MODEL="gpt-5"
+OPENAI_REASONING_EFFORT="low"
+
+# Optional Nominatim overrides for place geocoding.
+NOMINATIM_ENDPOINT="https://nominatim.openstreetmap.org"
+NOMINATIM_USER_AGENT="PassagePersonalApp/0.1"

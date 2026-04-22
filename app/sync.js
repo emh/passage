@@ -308,6 +308,17 @@ export async function fetchPhotoAsset(assetId, settings = loadSettings()) {
   return response.blob();
 }
 
+export async function inspectEntryUrl(url, settings = loadSettings()) {
+  const response = await fetch(getEndpoint(settings.syncBaseUrl, "/api/url-metadata"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ url })
+  });
+
+  if (!response.ok) throw new Error(await getErrorMessage(response));
+  return response.json();
+}
+
 function getEndpoint(syncBaseUrl, path) {
   if (!syncBaseUrl) throw new Error("Sync worker is not configured");
   const base = syncBaseUrl.replace(/\/+$/, "");

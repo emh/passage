@@ -3,10 +3,12 @@ import test from "node:test";
 
 import {
   materializeMutations,
+  normalizeExternalUrl,
   normalizeProfileRoom,
   normalizeTripRoom,
   parseAssetRoute,
   parseRoomRoute,
+  parseSocialMetadata,
   validateMutation
 } from "../workers/sync/src/index.js";
 
@@ -21,6 +23,27 @@ test("room routes extract profile code and action", () => {
 test("asset routes extract photo asset ids", () => {
   assert.deepEqual(parseAssetRoute("/api/assets/photo-123_ABC.jpg"), { assetId: "photo-123_ABC.jpg" });
   assert.equal(parseAssetRoute("/api/profiles/AB12"), null);
+});
+
+test("URL metadata helpers normalize public URLs and parse social tags", () => {
+  assert.equal(normalizeExternalUrl("example.com/place#section"), "https://example.com/place");
+  assert.throws(() => normalizeExternalUrl("http://127.0.0.1/private"), /not allowed/i);
+
+  const metadata = parseSocialMetadata(`
+    <html>
+      <head>
+        <meta property="og:title" content="Cafe Example">
+        <meta name="description" content="A tiny coffee bar">
+        <meta property="og:image" content="/card.jpg">
+      </head>
+    </html>
+  `, "https://example.com/places/cafe");
+
+  assert.deepEqual(metadata, {
+    title: "Cafe Example",
+    description: "A tiny coffee bar",
+    imageUrl: "https://example.com/card.jpg"
+  });
 });
 
 test("profile rooms normalize hidden profile metadata", () => {
