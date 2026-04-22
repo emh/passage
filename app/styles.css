@@ -449,6 +449,32 @@ h1 {
   padding-top: 32px;
 }
 
+.overlay-topbar {
+  display: grid;
+  width: 100%;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  column-gap: 18px;
+  margin-bottom: 16px;
+}
+
+.overlay-topbar .back-btn {
+  justify-self: start;
+  margin-bottom: 0;
+}
+
+.overlay-topbar .trip-head-actions,
+.overlay-topbar .entry-head-actions,
+.overlay-topbar .compose-head-actions,
+.overlay-topbar .trip-form-head-actions {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 18px;
+  justify-self: end;
+  white-space: nowrap;
+}
+
 .back-btn {
   display: inline-block;
   margin-bottom: 16px;
@@ -537,10 +563,6 @@ h1 {
   margin-bottom: 20px;
 }
 
-.delete-action-row {
-  align-items: flex-start;
-}
-
 .action-link {
   display: inline-block;
   padding: 10px 0;
@@ -570,12 +592,6 @@ h1 {
 
 .action-link.destructive:hover {
   color: var(--red-light);
-}
-
-.detail-rule {
-  margin: 22px 0;
-  border: 0;
-  border-top: 1px solid var(--rule);
 }
 
 .section-label {
@@ -953,15 +969,9 @@ h1 {
   margin-bottom: 0;
 }
 
-.delete-action-cluster {
-  display: inline-flex;
-  flex-direction: column;
-  align-items: flex-start;
-}
-
 .confirm-toast {
   position: fixed;
-  z-index: 240;
+  z-index: 10000;
   right: 18px;
   bottom: calc(22px + env(safe-area-inset-bottom, 0));
   left: 18px;

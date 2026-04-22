@@ -1951,14 +1951,16 @@ function renderTrip() {
 
   $("trip-body").innerHTML = `
     <div class="map-panel"><div class="map-canvas" id="trip-map"></div></div>
-    <button class="back-btn" data-action="trip-back" type="button">BACK</button>
+    <div class="overlay-topbar">
+      <button class="back-btn" data-action="trip-back" type="button">BACK</button>
+      ${tripActions ? `<div class="trip-head-actions">${tripActions}</div>` : ""}
+    </div>
     <div class="trip-head-dates">
       <span>${esc(formatDateRange(trip.startIso, trip.endIso).toUpperCase())} | ${plural(days, "day").toUpperCase()} | ${esc(plural(counts.total, "entry", "entries").toUpperCase())}</span>
       <span>${esc(statusLabel(trip))}</span>
     </div>
     <div class="trip-title-row">
       <h2 class="trip-head-title">${esc(trip.title)}</h2>
-      ${tripActions ? `<div class="trip-head-actions">${tripActions}</div>` : ""}
     </div>
     ${sharedBy ? `<div class="trip-shared-by">${esc(sharedBy)}</div>` : ""}
     ${renderTripParticipants(trip)}
@@ -2157,18 +2159,16 @@ function renderEntry() {
   const actions = readOnly || !canManageEntry(entry)
     ? ""
     : `
-      <hr class="detail-rule">
-      <div class="action-row delete-action-row">
-        <button class="action-link" data-action="edit-entry" type="button">EDIT</button>
-        <div class="delete-action-cluster">
-          <button class="action-link destructive" data-action="delete-entry" type="button">DELETE</button>
-        </div>
-      </div>
+      <button class="action-link" data-action="edit-entry" type="button">EDIT</button>
+      <button class="action-link destructive" data-action="delete-entry" type="button">DELETE</button>
     `;
 
   $("entry-body").innerHTML = `
     ${hasGeotag(entry) ? '<div class="map-panel compact"><div class="map-canvas" id="entry-map"></div></div>' : ""}
-    <button class="back-btn" data-action="entry-back" type="button">BACK</button>
+    <div class="overlay-topbar">
+      <button class="back-btn" data-action="entry-back" type="button">BACK</button>
+      ${actions ? `<div class="entry-head-actions">${actions}</div>` : ""}
+    </div>
     <div class="entry-meta">
       <span>${esc(entryMetaLine(entry, { includeAuthor, includeDate: true }))}</span>
     </div>
@@ -2180,7 +2180,6 @@ function renderEntry() {
       ${entry.url ? `<a class="entry-link" href="${esc(entry.url)}" target="_blank" rel="noreferrer">${esc(entryUrlLabel(entry.url))}</a>` : ""}
     </div>
     ${renderEntrySocial(entry)}
-    ${actions}
   `;
 
   requestAnimationFrame(() => renderEntryMap(entry.id));
@@ -2332,7 +2331,7 @@ function requestDeleteComment(commentId) {
     return;
   }
 
-  openConfirmation("comment", "Delete this comment?", "delete-comment", comment.id);
+  openConfirmation("comment", "Are you sure?", "delete-comment", comment.id);
 }
 
 function deleteComment(commentId) {
@@ -2560,10 +2559,17 @@ function renderCompose() {
     : currentPositionLabel();
   const timestampFallback = state.composeInitialSnapshot?.timestampInput ||
     toDateTimeInputValue(entry?.timestamp || new Date().toISOString());
+  const actions = [
+    '<button class="action-link" data-action="save-entry" type="button">SAVE</button>',
+    entry ? '<button class="action-link destructive" data-action="delete-entry" type="button">DELETE</button>' : ""
+  ].filter(Boolean).join("");
 
   $("compose-body").innerHTML = `
     <div class="map-panel compact"><div class="map-canvas" id="compose-location-map"></div></div>
-    <button class="back-btn" data-action="compose-back" type="button">BACK</button>
+    <div class="overlay-topbar">
+      <button class="back-btn" data-action="compose-back" type="button">BACK</button>
+      <div class="compose-head-actions">${actions}</div>
+    </div>
     <h2 class="screen-title">${esc(title)}</h2>
     <div class="trip-route" style="margin-bottom:20px;">in <em>${esc(trip?.title || "")}</em></div>
 
@@ -2590,11 +2596,6 @@ function renderCompose() {
     </label>
 
     ${renderLocationField(entry, locationLabel)}
-
-    <div class="action-row">
-      <button class="action-link" data-action="save-entry" type="button">SAVE</button>
-      <button class="action-link secondary" data-action="compose-back" type="button">CANCEL</button>
-    </div>
   `;
 
   requestAnimationFrame(renderComposeMap);
@@ -2762,8 +2763,8 @@ async function saveEntryFromForm() {
   schedulePhotoWork();
 }
 
-function deleteCurrentEntry() {
-  const entry = getEntry(state.currentEntryId);
+function deleteCurrentEntry(entryId = state.currentEntryId) {
+  const entry = getEntry(entryId);
   if (!entry) return;
   assertTripWritable(getTrip(entry.tripId));
   if (!canManageEntry(entry)) throw new Error("You cannot delete this entry.");
@@ -2771,9 +2772,10 @@ function deleteCurrentEntry() {
   queueLocalMutation("entry", entry.id, "_delete", true);
 
   saveAndFlushSync();
-  clearConfirmation("entry");
-  closeEntry();
-  renderTrip();
+  clearConfirmation();
+  if (state.composeEntryId === entry.id) closeCompose();
+  if (state.currentEntryId === entry.id) closeEntry();
+  if (state.currentTripId) renderTrip();
   renderAll();
   toast("entry deleted");
 }
@@ -2798,9 +2800,16 @@ function closeTripForm() {
 function renderTripForm() {
   const trip = getTrip(state.editingTripId);
   if (!trip) return;
+  const actions = `
+    <button class="action-link" data-action="save-trip" type="button">SAVE</button>
+    <button class="action-link destructive" data-action="delete-trip" type="button">DELETE</button>
+  `;
 
   $("trip-form-body").innerHTML = `
-    <button class="back-btn" data-action="trip-form-back" type="button">BACK</button>
+    <div class="overlay-topbar">
+      <button class="back-btn" data-action="trip-form-back" type="button">BACK</button>
+      <div class="trip-form-head-actions">${actions}</div>
+    </div>
     <h2 class="screen-title">Edit trip</h2>
 
     <label class="field">
@@ -2817,14 +2826,6 @@ function renderTripForm() {
         <span class="field-label">End</span>
         <input class="field-input" id="trip-end-input" type="date" value="${esc(trip.endIso)}">
       </label>
-    </div>
-
-    <div class="action-row delete-action-row">
-      <button class="action-link" data-action="save-trip" type="button">SAVE</button>
-      <div class="delete-action-cluster">
-        <button class="action-link destructive" data-action="delete-trip" type="button">DELETE</button>
-      </div>
-      <button class="action-link secondary" data-action="trip-form-back" type="button">CANCEL</button>
     </div>
   `;
 }
@@ -3115,6 +3116,13 @@ function syncOpenViews() {
   }
 }
 
+function handleSyncChange() {
+  save();
+  configureSync();
+  renderAll();
+  syncOpenViews();
+}
+
 function configureSync() {
   if (!state.settings.syncBaseUrl) {
     profileSync?.stop();
@@ -3138,11 +3146,7 @@ function configureSync() {
           renderSyncIndicator();
           if ($("link-overlay").classList.contains("active")) renderLinkScreen();
         },
-        onChange() {
-          save();
-          renderAll();
-          syncOpenViews();
-        },
+        onChange: handleSyncChange,
         onRoom(room) {
           const profile = normalizeProfile(room?.profile);
           if (profile) {
@@ -3186,16 +3190,12 @@ function configureSync() {
       syncState: () => sharedSyncState(code, tripId),
       save,
       onStatus() {},
-      onChange() {
-        save();
-        renderAll();
-        syncOpenViews();
-      },
+      onChange: handleSyncChange,
       onRoom(room) {
         const trip = getTrip(room?.tripId || tripId);
         if (trip && room?.code && trip.sharedCode !== room.code) {
           trip.sharedCode = room.code;
-          save();
+          handleSyncChange();
         }
       }
     });
@@ -3297,7 +3297,7 @@ function bindEvents() {
     if (action.dataset.action === "delete-entry") {
       const entry = getEntry(state.currentEntryId);
       if (entry && isReadOnlyTrip(getTrip(entry.tripId))) return toast("Shared trips are read only for now.");
-      return openConfirmation("entry", "Delete this entry?", "delete-entry", state.currentEntryId);
+      return openConfirmation("entry", "Are you sure?", "delete-entry", state.currentEntryId);
     }
     if (action.dataset.action === "edit-comment") return startEditComment(action.dataset.commentId);
     if (action.dataset.action === "save-comment-edit") return runAction(() => saveEditedComment(action.dataset.commentId));
@@ -3400,6 +3400,11 @@ function bindEvents() {
       saveEntryFromForm().catch(error => {
         toast(error instanceof Error ? error.message : "entry could not be saved");
       });
+      return;
+    }
+    if (action.dataset.action === "delete-entry") {
+      if (!state.composeEntryId) return;
+      return openConfirmation("compose", "Are you sure?", "delete-entry", state.composeEntryId);
     }
   });
 
@@ -3427,7 +3432,7 @@ function bindEvents() {
     if (action.dataset.action === "delete-trip") {
       const trip = getTrip(state.editingTripId);
       if (isReadOnlyTrip(trip)) return toast("Shared trips are read only for now.");
-      return openConfirmation("trip-form", "Delete this trip?", "delete-trip", state.editingTripId);
+      return openConfirmation("trip-form", "Are you sure?", "delete-trip", state.editingTripId);
     }
   });
 
