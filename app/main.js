@@ -94,6 +94,8 @@ const state = {
   confirmation: null,
   geolocationStatus: "checking",
   geolocationMessage: "checking location...",
+  locationPermissionAskedAt: loadedState.locationPermissionAskedAt || "",
+  locationEntryPermissionAskedAt: loadedState.locationEntryPermissionAskedAt || "",
   lastPosition: null
 };
 
@@ -167,10 +169,12 @@ async function initGeolocation() {
   }
 
   setGeolocationStatus("checking", "checking location...");
+  let permissionState = "";
 
   if (navigator.permissions?.query) {
     try {
       const permission = await navigator.permissions.query({ name: "geolocation" });
+      permissionState = permission.state;
       updatePermissionStatus(permission.state);
       permission.addEventListener("change", () => {
         updatePermissionStatus(permission.state);
@@ -183,7 +187,14 @@ async function initGeolocation() {
     }
   }
 
-  refreshCurrentPosition();
+  if (permissionState === "granted") {
+    refreshCurrentPosition({ quiet: true });
+    return;
+  }
+
+  if (permissionState === "denied") return;
+
+  setGeolocationStatus("prompting", "location will be requested when you add an entry");
 }
 
 function updatePermissionStatus(permissionState) {
@@ -192,7 +203,7 @@ function updatePermissionStatus(permissionState) {
   } else if (permissionState === "denied") {
     setGeolocationStatus("denied", "location denied; entries will save without coordinates");
   } else if (permissionState === "prompt") {
-    setGeolocationStatus("prompting", "allow location to geotag entries");
+    setGeolocationStatus("prompting", "location will be requested when you add an entry");
   }
 }
 
@@ -200,6 +211,18 @@ function setGeolocationStatus(status, message) {
   state.geolocationStatus = status;
   state.geolocationMessage = message;
   renderLocationStatus();
+}
+
+function recordLocationPermissionRequest() {
+  if (state.locationPermissionAskedAt) return;
+  state.locationPermissionAskedAt = new Date().toISOString();
+  save();
+}
+
+function recordEntryLocationPermissionRequest() {
+  if (state.locationEntryPermissionAskedAt) return;
+  state.locationEntryPermissionAskedAt = new Date().toISOString();
+  save();
 }
 
 function renderLocationStatus() {
@@ -240,6 +263,7 @@ function refreshCurrentPosition(options = {}) {
     return Promise.resolve(null);
   }
 
+  if (options.requestPermission) recordLocationPermissionRequest();
   if (!options.quiet) setGeolocationStatus("locating", "asking for location...");
 
   return new Promise(resolve => {
@@ -251,6 +275,7 @@ function refreshCurrentPosition(options = {}) {
         accuracy: position.coords.accuracy,
         capturedAt
       };
+      recordLocationPermissionRequest();
       setGeolocationStatus("enabled", `location enabled | +/- ${Math.round(position.coords.accuracy)}m`);
       refreshComposeLocationView();
       resolve(state.lastPosition);
@@ -282,10 +307,24 @@ function refreshComposeLocationView() {
 
 async function positionForNewEntry() {
   if (state.geolocationStatus === "denied") return null;
+  if (state.locationPermissionAskedAt &&
+    !state.lastPosition &&
+    state.geolocationStatus !== "enabled") {
+    return null;
+  }
   if (state.lastPosition && Date.now() - new Date(state.lastPosition.capturedAt).getTime() < 300000) {
     return state.lastPosition;
   }
   return await refreshCurrentPosition({ quiet: true });
+}
+
+function requestLocationForNewEntry() {
+  if (!("geolocation" in navigator)) return;
+  if (state.lastPosition || state.geolocationStatus === "denied") return;
+  if (state.locationEntryPermissionAskedAt) return;
+
+  recordEntryLocationPermissionRequest();
+  refreshCurrentPosition({ requestPermission: true });
 }
 
 async function geocodeAddress(query) {
@@ -2376,6 +2415,7 @@ function openCompose(entryId = "") {
   clearConfirmation("compose");
   renderCompose();
   openOverlay("compose-overlay");
+  if (!entry) requestLocationForNewEntry();
   requestAnimationFrame(() => $("entry-description-input")?.focus());
 }
 

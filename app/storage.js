@@ -28,6 +28,8 @@ export function createInitialState() {
     profileStateClocks: {},
     activitySeenAt: "",
     tripActivitySeenAt: {},
+    locationPermissionAskedAt: "",
+    locationEntryPermissionAskedAt: "",
     profileSync: createSyncState(),
     sharedTripSync: {}
   };
@@ -100,6 +102,8 @@ export function normalizeStoredState(data = {}) {
     profileStateClocks: plainObject(data.profileStateClocks),
     activitySeenAt: typeof data.activitySeenAt === "string" ? data.activitySeenAt : "",
     tripActivitySeenAt: normalizeSeenAtMap(data.tripActivitySeenAt),
+    locationPermissionAskedAt: typeof data.locationPermissionAskedAt === "string" ? data.locationPermissionAskedAt : "",
+    locationEntryPermissionAskedAt: typeof data.locationEntryPermissionAskedAt === "string" ? data.locationEntryPermissionAskedAt : "",
     profileSync: normalizeSyncState(data.profileSync),
     sharedTripSync: normalizeSharedTripSync(data.sharedTripSync)
   };
@@ -137,6 +141,8 @@ function serializeState(state) {
     profileStateClocks: state.profileStateClocks || {},
     activitySeenAt: typeof state.activitySeenAt === "string" ? state.activitySeenAt : "",
     tripActivitySeenAt: normalizeSeenAtMap(state.tripActivitySeenAt),
+    locationPermissionAskedAt: typeof state.locationPermissionAskedAt === "string" ? state.locationPermissionAskedAt : "",
+    locationEntryPermissionAskedAt: typeof state.locationEntryPermissionAskedAt === "string" ? state.locationEntryPermissionAskedAt : "",
     profileSync: normalizeSyncState(state.profileSync),
     sharedTripSync: normalizeSharedTripSync(state.sharedTripSync)
   };
