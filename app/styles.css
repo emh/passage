@@ -14,6 +14,8 @@
   --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --font: "Crimson Pro", "Palatino Linotype", Palatino, Georgia, serif;
   --mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  --overlay-top-padding: calc(32px + env(safe-area-inset-top, 0px));
+  --overlay-top-offset: calc(-32px - env(safe-area-inset-top, 0px));
   --ease: cubic-bezier(0.4, 0, 0.2, 1);
 }
 
@@ -328,10 +330,6 @@ h1 {
   overflow: hidden;
 }
 
-.overlay-body > .map-panel:first-child {
-  margin-top: -32px;
-}
-
 .map-panel.compact {
   height: 210px;
 }
@@ -446,7 +444,11 @@ h1 {
 }
 
 .overlay-body {
-  padding-top: 32px;
+  padding-top: var(--overlay-top-padding);
+}
+
+.overlay-body > .map-panel:first-child {
+  margin-top: var(--overlay-top-offset);
 }
 
 .overlay-topbar {
