@@ -159,7 +159,21 @@ test("entries keep legacy body text as description and normalize photo metadata"
     photoMime: "image/jpeg",
     photoWidth: 1600,
     photoHeight: 900,
-    photoSize: 123456
+    photoSize: 123456,
+    photos: [
+      {
+        photoAssetId: "photo-2",
+        photoMime: "image/png",
+        photoWidth: 800,
+        photoHeight: 600,
+        photoSize: 222,
+        photoUploadedAt: "2026-04-21T12:00:00.000Z"
+      },
+      {
+        photoAssetId: "photo-3",
+        photoMime: "text/plain"
+      }
+    ]
   });
 
   assert.equal(entry.type, "entry");
@@ -169,8 +183,27 @@ test("entries keep legacy body text as description and normalize photo metadata"
   assert.equal(entry.linkPreviewTitle, "Example title");
   assert.equal(entry.linkPreviewDescription, "Shared\nsummary");
   assert.equal(entry.linkPreviewImageUrl, "https://example.com/card.jpg");
+  assert.equal(entry.photos.length, 2);
+  assert.equal(entry.photoAssetId, "photo-2");
+  assert.equal(entry.photoMime, "image/png");
+  assert.equal(entry.photoWidth, 800);
+  assert.equal(entry.photos[1].photoMime, "");
+});
+
+test("entries convert legacy single photo fields into a photo list", () => {
+  const entry = normalizeEntry({
+    id: "entry-legacy-photo",
+    tripId: "trip-1",
+    photoAssetId: "photo-1",
+    photoMime: "image/jpeg",
+    photoWidth: 1600,
+    photoHeight: 900,
+    photoSize: 123456
+  });
+
+  assert.equal(entry.photos.length, 1);
+  assert.equal(entry.photos[0].photoAssetId, "photo-1");
   assert.equal(entry.photoAssetId, "photo-1");
-  assert.equal(entry.photoWidth, 1600);
 });
 
 test("trips normalize collaborator records", () => {

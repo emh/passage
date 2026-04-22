@@ -22,6 +22,7 @@ export const ENTRY_FIELDS = [
   "linkPreviewTitle",
   "linkPreviewDescription",
   "linkPreviewImageUrl",
+  "photos",
   "photoAssetId",
   "photoMime",
   "photoWidth",
@@ -219,6 +220,8 @@ export function createTrip(title) {
 export function normalizeEntry(input = {}) {
   const now = new Date().toISOString();
   const description = cleanText(input.description) || cleanText(input.body);
+  const photos = normalizeEntryPhotos(input.photos, input);
+  const firstPhoto = photos[0] || {};
   return {
     id: String(input.id || createId("entry")),
     tripId: String(input.tripId || ""),
@@ -230,12 +233,13 @@ export function normalizeEntry(input = {}) {
     linkPreviewTitle: cleanSingleLine(input.linkPreviewTitle),
     linkPreviewDescription: cleanText(input.linkPreviewDescription),
     linkPreviewImageUrl: normalizeAbsoluteHttpUrl(input.linkPreviewImageUrl),
-    photoAssetId: cleanSingleLine(input.photoAssetId),
-    photoMime: normalizePhotoMime(input.photoMime),
-    photoWidth: positiveIntegerOrNull(input.photoWidth),
-    photoHeight: positiveIntegerOrNull(input.photoHeight),
-    photoSize: positiveIntegerOrNull(input.photoSize),
-    photoUploadedAt: validDateTime(input.photoUploadedAt),
+    photos,
+    photoAssetId: firstPhoto.photoAssetId || "",
+    photoMime: firstPhoto.photoMime || "",
+    photoWidth: firstPhoto.photoWidth,
+    photoHeight: firstPhoto.photoHeight,
+    photoSize: firstPhoto.photoSize,
+    photoUploadedAt: firstPhoto.photoUploadedAt || "",
     timestamp: validDateTime(input.timestamp) || now,
     lat: geoNumberOrNull(input.lat),
     lng: geoNumberOrNull(input.lng),
@@ -495,6 +499,11 @@ function applyEntryMutation(state, mutation) {
     entry.description = value;
     entry.body = value;
   }
+  if (field === "photos") {
+    syncEntryPhotoMirror(entry);
+  } else if (field.startsWith("photo") && (!Array.isArray(entry.photos) || entry.photos.length <= 1)) {
+    entry.photos = normalizeEntryPhotos(null, entry);
+  }
   clocks[field] = mutation.timestamp;
   return true;
 }
@@ -628,6 +637,43 @@ function positiveIntegerOrNull(value) {
   return Number.isFinite(number) && number > 0 ? Math.round(number) : null;
 }
 
+function normalizeEntryPhotos(value, legacy = {}) {
+  const raw = Array.isArray(value) ? value : [];
+  const source = raw.length ? raw : (legacy.photoAssetId ? [legacy] : []);
+  const seen = new Set();
+  const photos = [];
+
+  for (const item of source) {
+    const photo = normalizeEntryPhoto(item);
+    if (!photo.photoAssetId || seen.has(photo.photoAssetId)) continue;
+    seen.add(photo.photoAssetId);
+    photos.push(photo);
+  }
+
+  return photos;
+}
+
+function normalizeEntryPhoto(input = {}) {
+  return {
+    photoAssetId: cleanSingleLine(input.photoAssetId),
+    photoMime: normalizePhotoMime(input.photoMime),
+    photoWidth: positiveIntegerOrNull(input.photoWidth),
+    photoHeight: positiveIntegerOrNull(input.photoHeight),
+    photoSize: positiveIntegerOrNull(input.photoSize),
+    photoUploadedAt: validDateTime(input.photoUploadedAt)
+  };
+}
+
+function syncEntryPhotoMirror(entry) {
+  const firstPhoto = Array.isArray(entry.photos) ? entry.photos[0] || {} : {};
+  entry.photoAssetId = firstPhoto.photoAssetId || "";
+  entry.photoMime = firstPhoto.photoMime || "";
+  entry.photoWidth = firstPhoto.photoWidth ?? null;
+  entry.photoHeight = firstPhoto.photoHeight ?? null;
+  entry.photoSize = firstPhoto.photoSize ?? null;
+  entry.photoUploadedAt = firstPhoto.photoUploadedAt || "";
+}
+
 function normalizeGeotagStatus(value) {
   const status = String(value || "").trim();
   return ["ready", "denied", "unavailable", "error", "skipped"].includes(status) ? status : "";
@@ -680,6 +726,7 @@ function coerceEntryField(field, value) {
   if (field === "url") return normalizeEntryUrl(value);
   if (field === "linkPreviewDescription") return cleanText(value);
   if (field === "linkPreviewImageUrl") return normalizeAbsoluteHttpUrl(value);
+  if (field === "photos") return normalizeEntryPhotos(value);
   if (field === "photoMime") return normalizePhotoMime(value);
   if (field === "photoWidth" || field === "photoHeight" || field === "photoSize") return positiveIntegerOrNull(value);
   if (field === "photoAssetId") return cleanSingleLine(value);

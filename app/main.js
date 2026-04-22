@@ -75,8 +75,8 @@ const state = {
   entryLocationQuery: "",
   entryLocationError: "",
   entryFormDraft: null,
-  entryPhotoDraft: null,
-  entryPhotoRemoved: false,
+  entryPhotoDrafts: [],
+  entryPhotoRemovedIds: new Set(),
   entryPhotoError: "",
   entryPhotoNote: "",
   entryUrlMetadataDraft: null,
@@ -631,7 +631,7 @@ function entryDescription(entry) {
 }
 
 function entryHasPhoto(entry) {
-  return Boolean(entry?.photoAssetId);
+  return entryPhotos(entry).length > 0;
 }
 
 function entryUrlLabel(url) {
@@ -765,15 +765,48 @@ function entryHasRequiredContent({ title = "", description = "", url = "", hasPh
   );
 }
 
-function photoFieldsFromDraft(draft) {
+function entryPhotos(entry) {
+  const photos = Array.isArray(entry?.photos) ? entry.photos : [];
+  if (photos.length) return photos.filter(photo => photo?.photoAssetId);
+  return entry?.photoAssetId ? [{
+    photoAssetId: entry.photoAssetId,
+    photoMime: entry.photoMime || "",
+    photoWidth: entry.photoWidth || null,
+    photoHeight: entry.photoHeight || null,
+    photoSize: entry.photoSize || null,
+    photoUploadedAt: entry.photoUploadedAt || ""
+  }] : [];
+}
+
+function photoFieldsFromList(photos = []) {
+  const normalized = photos
+    .filter(photo => photo?.photoAssetId)
+    .map(photo => ({
+      photoAssetId: photo.photoAssetId || "",
+      photoMime: photo.photoMime || "",
+      photoWidth: photo.photoWidth || null,
+      photoHeight: photo.photoHeight || null,
+      photoSize: photo.photoSize || null,
+      photoUploadedAt: photo.photoUploadedAt || ""
+    }));
+  const first = normalized[0] || {};
+
   return {
-    photoAssetId: draft?.photoAssetId || "",
-    photoMime: draft?.photoMime || "",
-    photoWidth: draft?.photoWidth || null,
-    photoHeight: draft?.photoHeight || null,
-    photoSize: draft?.photoSize || null,
-    photoUploadedAt: draft?.photoUploadedAt || ""
+    photos: normalized,
+    photoAssetId: first.photoAssetId || "",
+    photoMime: first.photoMime || "",
+    photoWidth: first.photoWidth || null,
+    photoHeight: first.photoHeight || null,
+    photoSize: first.photoSize || null,
+    photoUploadedAt: first.photoUploadedAt || ""
   };
+}
+
+function photoListSignature(photos = []) {
+  return JSON.stringify(photos.map(photo => ({
+    photoAssetId: photo.photoAssetId || "",
+    photoUploadedAt: photo.photoUploadedAt || ""
+  })));
 }
 
 function renderConfirmation() {
@@ -812,8 +845,8 @@ function clearConfirmation(view = "") {
   }
 }
 
-function photoStatus(entry) {
-  const assetId = entry?.photoAssetId || "";
+function photoStatus(photo) {
+  const assetId = photo?.photoAssetId || "";
   if (!assetId) return { label: "", tone: "" };
 
   const transfer = photoTransferStatus.get(assetId);
@@ -823,10 +856,10 @@ function photoStatus(entry) {
   if (photoDownloads.has(assetId)) return { label: "downloading photo...", tone: "pending" };
 
   const cached = Boolean(getCachedPhotoUrl(assetId));
-  if (!entry.photoUploadedAt && cached && state.settings.syncBaseUrl) return { label: "photo pending upload", tone: "pending" };
-  if (!entry.photoUploadedAt && cached) return { label: "photo saved locally", tone: "local" };
-  if (entry.photoUploadedAt && cached) return { label: "photo cached", tone: "ready" };
-  if (entry.photoUploadedAt) return { label: "photo ready to download", tone: "pending" };
+  if (!photo.photoUploadedAt && cached && state.settings.syncBaseUrl) return { label: "photo pending upload", tone: "pending" };
+  if (!photo.photoUploadedAt && cached) return { label: "photo saved locally", tone: "local" };
+  if (photo.photoUploadedAt && cached) return { label: "photo cached", tone: "ready" };
+  if (photo.photoUploadedAt) return { label: "photo ready to download", tone: "pending" };
   return { label: "photo pending upload", tone: "pending" };
 }
 
@@ -913,7 +946,7 @@ function queueEntityPatch(entityType, currentRecord, nextRecord, fields) {
 function valuesEqual(left, right) {
   if (Array.isArray(left) || Array.isArray(right)) {
     if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) return false;
-    return left.every((value, index) => value === right[index]);
+    return JSON.stringify(left) === JSON.stringify(right);
   }
   return left === right;
 }
@@ -956,13 +989,15 @@ function schedulePhotoWork() {
 async function refreshPhotoAssets() {
   const entries = visibleEntries(state.entries).filter(entryHasPhoto);
   await Promise.all(entries.map(async entry => {
-    await ensureEntryPhotoCached(entry);
-    await uploadPendingPhotoForEntry(entry);
+    await Promise.all(entryPhotos(entry).map(async photo => {
+      await ensureEntryPhotoCached(photo);
+      await uploadPendingPhotoForEntryPhoto(entry, photo);
+    }));
   }));
 }
 
-async function ensureEntryPhotoCached(entry) {
-  const assetId = entry?.photoAssetId || "";
+async function ensureEntryPhotoCached(photo) {
+  const assetId = photo?.photoAssetId || "";
   if (!assetId || getCachedPhotoUrl(assetId) || photoDownloads.has(assetId)) return;
   if (photoTransferStatus.get(assetId)?.status === "download-failed" && photoRetryTimers.has(assetId)) return;
 
@@ -970,7 +1005,7 @@ async function ensureEntryPhotoCached(entry) {
   setPhotoTransferStatus(assetId, "");
   try {
     if (!(await hasPhotoAsset(assetId))) {
-      if (!entry.photoUploadedAt || !state.settings.syncBaseUrl) return;
+      if (!photo.photoUploadedAt || !state.settings.syncBaseUrl) return;
       const blob = await fetchPhotoAsset(assetId, state.settings);
       await putPhotoAsset(assetId, blob);
     }
@@ -987,9 +1022,9 @@ async function ensureEntryPhotoCached(entry) {
   }
 }
 
-async function uploadPendingPhotoForEntry(entry) {
-  const assetId = entry?.photoAssetId || "";
-  if (!assetId || entry.photoUploadedAt || !state.settings.syncBaseUrl || photoUploads.has(assetId)) return;
+async function uploadPendingPhotoForEntryPhoto(entry, photo) {
+  const assetId = photo?.photoAssetId || "";
+  if (!assetId || photo.photoUploadedAt || !state.settings.syncBaseUrl || photoUploads.has(assetId)) return;
   if (photoTransferStatus.get(assetId)?.status === "upload-failed" && photoRetryTimers.has(assetId)) return;
 
   photoUploads.add(assetId);
@@ -1000,8 +1035,13 @@ async function uploadPendingPhotoForEntry(entry) {
 
     const payload = await uploadPhotoAsset(assetId, asset.blob, state.settings);
     const current = getEntry(entry.id);
-    if (current?.photoAssetId === assetId && !current.photoUploadedAt) {
-      queueLocalMutation("entry", current.id, "photoUploadedAt", payload.uploadedAt || new Date().toISOString());
+    const currentPhotos = entryPhotos(current);
+    if (currentPhotos.some(candidate => candidate.photoAssetId === assetId && !candidate.photoUploadedAt)) {
+      const uploadedAt = payload.uploadedAt || new Date().toISOString();
+      const nextPhotos = currentPhotos.map(candidate => candidate.photoAssetId === assetId
+        ? { ...candidate, photoUploadedAt: uploadedAt }
+        : candidate);
+      queueEntryPhotoListUpdate(current, nextPhotos);
       saveAndFlushSync();
       renderAll();
       syncOpenViews();
@@ -1012,6 +1052,17 @@ async function uploadPendingPhotoForEntry(entry) {
     photoUploads.delete(assetId);
     renderAll();
     syncOpenViews();
+  }
+}
+
+function queueEntryPhotoListUpdate(entry, photos) {
+  if (!entry) return;
+  const fields = photoFieldsFromList(photos);
+  queueLocalMutation("entry", entry.id, "photos", fields.photos);
+  for (const field of ["photoAssetId", "photoMime", "photoWidth", "photoHeight", "photoSize", "photoUploadedAt"]) {
+    if (!valuesEqual(entry[field], fields[field])) {
+      queueLocalMutation("entry", entry.id, field, fields[field]);
+    }
   }
 }
 
@@ -2154,7 +2205,7 @@ function renderEntryItem(entry) {
       </div>
       <div class="entry-body">
         ${entry.title ? `<p class="entry-summary-title">${esc(entry.title)}</p>` : ""}
-        ${renderEntryPhoto(entry, "summary")}
+        ${renderEntryPhotos(entry, "summary")}
         ${paragraphs}
         ${url ? `<a class="entry-link" href="${esc(url)}" target="_blank" rel="noreferrer">${esc(entryUrlLabel(url))}</a>` : ""}
         ${renderEntryLinkPreview(entry, "summary")}
@@ -2198,24 +2249,44 @@ function toggleEntryComments(entryId) {
   }
 }
 
-function renderEntryPhoto(entry, variant = "summary") {
-  if (!entryHasPhoto(entry)) return "";
+function renderEntryPhotos(entry, variant = "summary") {
+  const photos = entryPhotos(entry);
+  if (!photos.length) return "";
 
-  const url = getCachedPhotoUrl(entry.photoAssetId);
-  const status = photoStatus(entry);
+  if (variant === "detail") {
+    return `
+      <div class="entry-photo-column detail">
+        ${photos.map((photo, index) => renderEntryPhotoItem(photo, entry, "detail", index)).join("")}
+      </div>
+    `;
+  }
+
+  const columns = photos.length === 4 ? 2 : Math.min(3, photos.length);
+  return `
+    <div class="entry-photo-grid summary cols-${esc(columns)}">
+      ${photos.map((photo, index) => renderEntryPhotoItem(photo, entry, "summary", index)).join("")}
+    </div>
+  `;
+}
+
+function renderEntryPhotoItem(photo, entry, variant, index = 0) {
+  const url = getCachedPhotoUrl(photo.photoAssetId);
+  const status = photoStatus(photo);
   const statusHtml = status.label && status.tone !== "ready"
     ? `<div class="photo-status ${esc(status.tone)}">${esc(status.label)}</div>`
     : "";
 
   if (url) {
     return `
-      <img class="entry-photo ${esc(variant)}" src="${esc(url)}" alt="${esc(entry.title || "entry photo")}" loading="lazy">
-      ${statusHtml}
+      <figure class="entry-photo-frame ${esc(variant)}">
+        <img class="entry-photo ${esc(variant)}" src="${esc(url)}" alt="${esc(entry.title || `entry photo ${index + 1}`)}" loading="lazy">
+        ${statusHtml}
+      </figure>
     `;
   }
 
-  ensureEntryPhotoCached(entry).catch(() => {});
-  const label = status.label || (entry.photoUploadedAt ? "loading photo..." : "photo pending upload");
+  ensureEntryPhotoCached(photo).catch(() => {});
+  const label = status.label || (photo.photoUploadedAt ? "loading photo..." : "photo pending upload");
   return `<div class="entry-photo-placeholder ${esc(variant)}">${esc(label)}</div>`;
 }
 
@@ -2324,7 +2395,7 @@ function renderEntry() {
     </div>
     ${entryLocationLabel(entry) ? `<div class="entry-location">${esc(entryLocationLabel(entry))}${entry.locationAccuracy ? ` | +/- ${esc(Math.round(entry.locationAccuracy))}m` : ""}</div>` : ""}
     ${entry.title ? `<h2 class="entry-detail-title">${esc(entry.title)}</h2>` : ""}
-    ${renderEntryPhoto(entry, "detail")}
+    ${renderEntryPhotos(entry, "detail")}
     <div class="entry-detail-content">
       ${bodyParagraphs(entryDescription(entry))}
       ${entry.url ? `<a class="entry-link" href="${esc(entry.url)}" target="_blank" rel="noreferrer">${esc(entryUrlLabel(entry.url))}</a>` : ""}
@@ -2519,8 +2590,8 @@ function openCompose(entryId = "") {
   state.entryLocationQuery = "";
   state.entryLocationError = "";
   state.entryFormDraft = null;
-  state.entryPhotoDraft = null;
-  state.entryPhotoRemoved = false;
+  state.entryPhotoDrafts = [];
+  state.entryPhotoRemovedIds = new Set();
   state.entryPhotoError = "";
   state.entryPhotoNote = "";
   resetEntryUrlMetadataState(entry);
@@ -2553,8 +2624,8 @@ function closeCompose() {
   state.entryLocationQuery = "";
   state.entryLocationError = "";
   state.entryFormDraft = null;
-  state.entryPhotoDraft = null;
-  state.entryPhotoRemoved = false;
+  state.entryPhotoDrafts = [];
+  state.entryPhotoRemovedIds = new Set();
   state.entryPhotoError = "";
   state.entryPhotoNote = "";
   resetEntryUrlMetadataState(null);
@@ -2593,7 +2664,7 @@ function composeSnapshotFromEntry(entry) {
     linkPreview: linkPreviewSignature(entryLinkPreview(entry)),
     timestampInput: toDateTimeInputValue(timestamp),
     location: locationSignature(entry),
-    photoAssetId: entry?.photoAssetId || ""
+    photos: photoListSignature(entryPhotos(entry))
   };
 }
 
@@ -2608,9 +2679,7 @@ function currentComposeSnapshot() {
   const linkPreview = linkPreviewSignature(currentLinkPreview(entry, url));
   const timestampInput = String(state.entryFormDraft?.timestampInput || initial.timestampInput || "").trim();
   const location = state.entryLocationDraft ? locationSignature(state.entryLocationDraft) : initial.location;
-  const photoAssetId = state.entryPhotoRemoved
-    ? ""
-    : state.entryPhotoDraft?.photoAssetId || initial.photoAssetId || "";
+  const photos = photoListSignature(composePhotoList(entry));
 
   return {
     title,
@@ -2619,7 +2688,7 @@ function currentComposeSnapshot() {
     linkPreview,
     timestampInput,
     location,
-    photoAssetId
+    photos
   };
 }
 
@@ -2634,7 +2703,7 @@ function hasUnsavedComposeChanges() {
     current.linkPreview !== initial.linkPreview ||
     current.timestampInput !== initial.timestampInput ||
     current.location !== initial.location ||
-    current.photoAssetId !== initial.photoAssetId;
+    current.photos !== initial.photos;
 }
 
 function locationSignature(location) {
@@ -2878,36 +2947,60 @@ function renderEntryLinkPreview(entry, mode = "summary") {
   return renderLinkPreview(preview, { mode, href: entry.url });
 }
 
+function composePhotoList(entry) {
+  const removed = state.entryPhotoRemovedIds || new Set();
+  const existing = entryPhotos(entry).filter(photo => !removed.has(photo.photoAssetId));
+  return [
+    ...existing,
+    ...(Array.isArray(state.entryPhotoDrafts) ? state.entryPhotoDrafts : [])
+  ];
+}
+
 function renderPhotoField(entry) {
-  const draft = state.entryPhotoDraft;
-  const existing = !state.entryPhotoRemoved && entryHasPhoto(entry) ? entry : null;
-  const photo = draft || existing;
-  const url = photo?.photoAssetId ? getCachedPhotoUrl(photo.photoAssetId) : "";
-  const status = photoStatus(photo);
+  const photos = composePhotoList(entry);
   const helperParts = [];
-  if (photo?.photoAssetId) {
-    helperParts.push(`${photo.photoWidth || "?"} x ${photo.photoHeight || "?"}`);
-    if (status.label) helperParts.push(status.label);
+  if (photos.length) {
+    helperParts.push(plural(photos.length, "photo"));
+    const pending = photos
+      .map(photoStatus)
+      .map(status => status.label)
+      .filter(Boolean);
+    if (pending.length) helperParts.push(uniqueLabels(pending).join(" | "));
   } else {
     helperParts.push("optional");
   }
   if (state.entryPhotoNote) helperParts.push(state.entryPhotoNote);
   const helper = state.entryPhotoError || helperParts.filter(Boolean).join(" | ");
 
-  if (photo?.photoAssetId) {
-    ensureEntryPhotoCached(photo).catch(() => {});
-  }
+  for (const photo of photos) ensureEntryPhotoCached(photo).catch(() => {});
 
   return `
     <div class="field photo-field">
       <div class="field-label-row">
-        <span class="field-label">Photo</span>
-        ${photo?.photoAssetId ? '<button class="inline-link" data-action="remove-entry-photo" type="button">REMOVE</button>' : ""}
+        <span class="field-label">Photos</span>
       </div>
-      ${url ? `<img class="photo-preview" src="${esc(url)}" alt="selected photo">` : photo?.photoAssetId ? `<div class="entry-photo-placeholder form">loading photo...</div>` : ""}
-      <input class="file-input" id="entry-photo-input" type="file" accept="image/*">
-      <label class="action-link file-picker-link" for="entry-photo-input">${photo?.photoAssetId ? "CHANGE PHOTO" : "CHOOSE PHOTO"}</label>
-      <span class="field-helper ${state.entryPhotoError || status.tone === "error" ? "accent" : ""}">${esc(helper)}</span>
+      ${photos.length ? `
+        <div class="photo-edit-grid">
+          ${photos.map(renderEditablePhoto).join("")}
+        </div>
+      ` : ""}
+      <input class="file-input" id="entry-photo-input" type="file" accept="image/*" multiple>
+      <label class="action-link file-picker-link" for="entry-photo-input">${photos.length ? "ADD PHOTOS" : "CHOOSE PHOTOS"}</label>
+      <span class="field-helper ${state.entryPhotoError ? "accent" : ""}">${esc(helper)}</span>
+    </div>
+  `;
+}
+
+function renderEditablePhoto(photo) {
+  const url = getCachedPhotoUrl(photo.photoAssetId);
+  const status = photoStatus(photo);
+  const label = status.label || "loading photo...";
+  return `
+    <div class="photo-edit-item">
+      ${url
+        ? `<img class="photo-preview" src="${esc(url)}" alt="selected photo">`
+        : `<div class="entry-photo-placeholder form">${esc(label)}</div>`}
+      <button class="inline-link" data-action="remove-entry-photo" data-photo-asset-id="${esc(photo.photoAssetId)}" type="button">REMOVE</button>
     </div>
   `;
 }
@@ -2982,28 +3075,39 @@ async function geocodeEntryLocationFromForm() {
   }
 }
 
-async function selectEntryPhoto(file) {
+async function selectEntryPhotos(files) {
+  const list = Array.from(files || []).filter(Boolean);
+  if (!list.length) return;
+
   captureEntryFormDraft();
   clearConfirmation("compose");
-  state.entryPhotoError = "processing photo...";
+  state.entryPhotoError = `processing ${plural(list.length, "photo")}...`;
   state.entryPhotoNote = "";
   renderCompose();
 
-  const processed = await processPhotoFile(file);
-  state.entryPhotoDraft = processed.metadata;
-  state.entryPhotoRemoved = false;
+  const processed = [];
+  for (const file of list) {
+    processed.push(await processPhotoFile(file));
+  }
+
+  state.entryPhotoDrafts = [
+    ...(Array.isArray(state.entryPhotoDrafts) ? state.entryPhotoDrafts : []),
+    ...processed.map(item => item.metadata)
+  ];
   state.entryPhotoError = "";
   const photoNotes = [];
+  const firstCaptured = processed.find(item => item.exif?.capturedAt);
 
-  if (processed.exif?.capturedAt && !state.composeEntryId) {
+  if (firstCaptured?.exif?.capturedAt && !state.composeEntryId) {
     state.entryFormDraft ||= {};
-    state.entryFormDraft.timestampInput = toDateTimeInputValue(processed.exif.capturedAt);
+    state.entryFormDraft.timestampInput = toDateTimeInputValue(firstCaptured.exif.capturedAt);
     photoNotes.push("time from photo");
   }
 
-  if (Number.isFinite(processed.exif?.lat) && Number.isFinite(processed.exif?.lng)) {
-    const lat = processed.exif.lat;
-    const lng = processed.exif.lng;
+  const firstLocated = processed.find(item => Number.isFinite(item.exif?.lat) && Number.isFinite(item.exif?.lng));
+  if (firstLocated && !state.entryLocationDraft) {
+    const lat = firstLocated.exif.lat;
+    const lng = firstLocated.exif.lng;
     try {
       state.entryLocationDraft = await reverseGeocodeCoordinates(lat, lng);
     } catch {
@@ -3026,7 +3130,7 @@ async function selectEntryPhoto(file) {
 
   state.entryPhotoNote = photoNotes.join(" | ");
   renderCompose();
-  toast("photo added");
+  toast(list.length === 1 ? "photo added" : "photos added");
 }
 
 async function saveEntryFromForm() {
@@ -3044,9 +3148,8 @@ async function saveEntryFromForm() {
   const title = $("entry-title-input")?.value || "";
   const description = $("entry-description-input")?.value.trim() || "";
   const url = $("entry-url-input")?.value || "";
-  const hasPhoto = state.entryPhotoRemoved
-    ? false
-    : Boolean(state.entryPhotoDraft?.photoAssetId || currentEntry?.photoAssetId);
+  const photos = composePhotoList(currentEntry);
+  const hasPhoto = photos.length > 0;
 
   if (!entryHasRequiredContent({ title, description, url, hasPhoto })) {
     toast("add a title, description, URL, or photo");
@@ -3061,15 +3164,10 @@ async function saveEntryFromForm() {
     body: description,
     url,
     ...linkPreviewFields(linkPreview),
+    ...photoFieldsFromList(photos),
     timestamp: fromDateTimeInputValue($("entry-time-input")?.value || ""),
     dateUpdated: new Date().toISOString()
   };
-
-  if (state.entryPhotoRemoved) {
-    Object.assign(fields, photoFieldsFromDraft(null));
-  } else if (state.entryPhotoDraft) {
-    Object.assign(fields, photoFieldsFromDraft(state.entryPhotoDraft));
-  }
 
   if (state.entryLocationDraft) {
     Object.assign(fields, {
@@ -3744,8 +3842,13 @@ function bindEvents() {
     if (action.dataset.action === "remove-entry-photo") {
       captureEntryFormDraft();
       clearConfirmation("compose");
-      state.entryPhotoDraft = null;
-      state.entryPhotoRemoved = true;
+      const assetId = action.dataset.photoAssetId || "";
+      state.entryPhotoDrafts = (state.entryPhotoDrafts || []).filter(photo => photo.photoAssetId !== assetId);
+      const entry = state.composeEntryId ? getEntry(state.composeEntryId) : null;
+      if (entryPhotos(entry).some(photo => photo.photoAssetId === assetId)) {
+        state.entryPhotoRemovedIds ||= new Set();
+        state.entryPhotoRemovedIds.add(assetId);
+      }
       state.entryPhotoError = "";
       state.entryPhotoNote = "";
       renderCompose();
@@ -3790,9 +3893,9 @@ function bindEvents() {
 
   $("compose-overlay").addEventListener("change", event => {
     if (event.target?.id !== "entry-photo-input") return;
-    const file = event.target.files?.[0];
-    if (!file) return;
-    runAction(() => selectEntryPhoto(file));
+    const files = event.target.files;
+    if (!files?.length) return;
+    runAction(() => selectEntryPhotos(files));
   });
 
   $("compose-overlay").addEventListener("keydown", event => {
