@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  filterTripStateForViewer,
   materializeMutations,
   normalizeExternalUrl,
   normalizeProfileRoom,
@@ -105,6 +106,81 @@ test("trip rooms accept and materialize collaborator updates", () => {
 
   const visible = materializeMutations([createTrip, addCollaborator], room);
   assert.deepEqual(visible.trips[0].collaborators, [collaborator]);
+});
+
+test("trip room snapshots filter entry visibility for viewers and collaborators", () => {
+  const room = normalizeTripRoom({
+    code: "trip-12",
+    trip: { id: "trip-1", title: "Road trip", ownerProfileId: "owner-1", ownerName: "Owner" }
+  });
+  const createTrip = mutation({
+    id: "trip-create",
+    entityType: "trip",
+    entityId: "trip-1",
+    field: "_create",
+    timestamp: hlc(100),
+    value: {
+      id: "trip-1",
+      title: "Road trip",
+      startIso: "2026-04-01",
+      endIso: "2026-04-03",
+      collaborators: [{ profileId: "collab-1", name: "Collab" }]
+    }
+  });
+  const entries = [
+    mutation({
+      id: "entry-public",
+      entityType: "entry",
+      entityId: "entry-public",
+      field: "_create",
+      timestamp: hlc(101),
+      value: {
+        id: "entry-public",
+        tripId: "trip-1",
+        body: "Visible to everyone",
+        visibility: "public",
+        authorProfileId: "author-1"
+      }
+    }),
+    mutation({
+      id: "entry-collab",
+      entityType: "entry",
+      entityId: "entry-collab",
+      field: "_create",
+      timestamp: hlc(102),
+      value: {
+        id: "entry-collab",
+        tripId: "trip-1",
+        body: "Visible to collaborators",
+        visibility: "collaborators",
+        authorProfileId: "author-1"
+      }
+    }),
+    mutation({
+      id: "entry-private",
+      entityType: "entry",
+      entityId: "entry-private",
+      field: "_create",
+      timestamp: hlc(103),
+      value: {
+        id: "entry-private",
+        tripId: "trip-1",
+        body: "Visible only to the author",
+        visibility: "private",
+        authorProfileId: "author-1"
+      }
+    })
+  ];
+  const materialized = materializeMutations([createTrip, ...entries], room);
+
+  const viewerState = filterTripStateForViewer(materialized, { profileId: "viewer-1" });
+  assert.deepEqual(viewerState.entries.map(entry => entry.id), ["entry-public"]);
+
+  const collaboratorState = filterTripStateForViewer(materialized, { profileId: "collab-1" });
+  assert.deepEqual(collaboratorState.entries.map(entry => entry.id), ["entry-public", "entry-collab"]);
+
+  const authorState = filterTripStateForViewer(materialized, { profileId: "author-1" });
+  assert.deepEqual(authorState.entries.map(entry => entry.id), ["entry-public", "entry-collab", "entry-private"]);
 });
 
 test("worker validation accepts trip, entry, comment, and profile state mutations for the room profile", () => {

@@ -42,6 +42,7 @@ export const ENTRY_FIELDS = [
   "geotagStatus",
   "authorProfileId",
   "authorName",
+  "visibility",
   "dateCreated",
   "dateUpdated",
   "deleted"
@@ -61,6 +62,8 @@ export const COMMENT_FIELDS = [
 export const PROFILE_STATE_FIELDS = [
   "activitySeenAt"
 ];
+
+export const ENTRY_VISIBILITY_OPTIONS = ["private", "collaborators", "public"];
 
 const TRIP_ACTIVITY_SEEN_PREFIX = "tripActivitySeenAt:";
 
@@ -253,6 +256,7 @@ export function normalizeEntry(input = {}) {
     geotagStatus: normalizeGeotagStatus(input.geotagStatus),
     authorProfileId: String(input.authorProfileId || "").trim(),
     authorName: normalizeUserName(input.authorName),
+    visibility: normalizeEntryVisibility(input.visibility),
     dateCreated: typeof input.dateCreated === "string" && input.dateCreated ? input.dateCreated : now,
     dateUpdated: typeof input.dateUpdated === "string" ? input.dateUpdated : "",
     deleted: Boolean(input.deleted)
@@ -311,6 +315,44 @@ export function visibleEntries(entries = []) {
 
 export function visibleComments(comments = []) {
   return comments.filter(comment => !comment.deleted);
+}
+
+export function normalizeViewer(input = {}) {
+  return {
+    profileId: String(input.profileId || "").trim(),
+    name: normalizeUserName(input.name),
+    access: normalizeViewerAccess(input.access)
+  };
+}
+
+export function viewerMatchesProfile(viewer, profileId, name = "") {
+  const currentViewer = normalizeViewer(viewer);
+  const candidateId = String(profileId || "").trim();
+  if (currentViewer.profileId && candidateId) return currentViewer.profileId === candidateId;
+  return Boolean(currentViewer.name && normalizeUserName(name) && currentViewer.name === normalizeUserName(name));
+}
+
+export function normalizeEntryVisibility(value) {
+  const visibility = String(value || "").trim().toLowerCase();
+  return ENTRY_VISIBILITY_OPTIONS.includes(visibility) ? visibility : "public";
+}
+
+export function viewerCanAccessCollaboratorEntries(trip, viewer) {
+  const currentViewer = normalizeViewer(viewer);
+  if (currentViewer.access === "collaborator") return true;
+  if (viewerMatchesProfile(currentViewer, trip?.ownerProfileId, trip?.ownerName)) return true;
+  return normalizeCollaborators(trip?.collaborators)
+    .some(collaborator => viewerMatchesProfile(currentViewer, collaborator.profileId, collaborator.name));
+}
+
+export function canViewerSeeEntry(entry, trip, viewer) {
+  const visibility = normalizeEntryVisibility(entry?.visibility);
+  if (visibility === "public") return true;
+
+  const currentViewer = normalizeViewer(viewer);
+  if (viewerMatchesProfile(currentViewer, entry?.authorProfileId, entry?.authorName)) return true;
+  if (visibility === "private") return false;
+  return viewerCanAccessCollaboratorEntries(trip, currentViewer);
 }
 
 export function entriesForTrip(entries, tripId) {
@@ -679,6 +721,10 @@ function normalizeGeotagStatus(value) {
   return ["ready", "denied", "unavailable", "error", "skipped"].includes(status) ? status : "";
 }
 
+function normalizeViewerAccess(value) {
+  return String(value || "").trim().toLowerCase() === "collaborator" ? "collaborator" : "viewer";
+}
+
 function normalizeEntryUrl(value) {
   const text = cleanSingleLine(value);
   if (!text) return "";
@@ -734,6 +780,7 @@ function coerceEntryField(field, value) {
   if (field === "geotagStatus") return normalizeGeotagStatus(value);
   if (field === "authorProfileId") return String(value || "").trim();
   if (field === "authorName") return normalizeUserName(value);
+  if (field === "visibility") return normalizeEntryVisibility(value);
   return cleanSingleLine(value);
 }
 

@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import {
   applyMutation,
+  canViewerSeeEntry,
   createComment,
   isTripSharedByOtherProfile,
   normalizeEntry,
@@ -188,6 +189,7 @@ test("entries keep legacy body text as description and normalize photo metadata"
   assert.equal(entry.photoMime, "image/png");
   assert.equal(entry.photoWidth, 800);
   assert.equal(entry.photos[1].photoMime, "");
+  assert.equal(entry.visibility, "public");
 });
 
 test("entries convert legacy single photo fields into a photo list", () => {
@@ -204,6 +206,50 @@ test("entries convert legacy single photo fields into a photo list", () => {
   assert.equal(entry.photos.length, 1);
   assert.equal(entry.photos[0].photoAssetId, "photo-1");
   assert.equal(entry.photoAssetId, "photo-1");
+});
+
+test("entries normalize supported visibility values and default invalid ones to public", () => {
+  assert.equal(normalizeEntry({ id: "entry-1", tripId: "trip-1", visibility: "private" }).visibility, "private");
+  assert.equal(normalizeEntry({ id: "entry-2", tripId: "trip-1", visibility: "collaborators" }).visibility, "collaborators");
+  assert.equal(normalizeEntry({ id: "entry-3", tripId: "trip-1", visibility: "friends" }).visibility, "public");
+});
+
+test("entry visibility matches author, collaborators, and public viewers", () => {
+  const trip = normalizeTrip({
+    id: "trip-1",
+    title: "Road trip",
+    ownerProfileId: "owner-1",
+    ownerName: "Owner",
+    collaborators: [{ profileId: "collab-1", name: "Collab" }]
+  });
+  const privateEntry = normalizeEntry({
+    id: "entry-private",
+    tripId: trip.id,
+    authorProfileId: "author-1",
+    authorName: "Author",
+    visibility: "private"
+  });
+  const collaboratorEntry = normalizeEntry({
+    id: "entry-collab",
+    tripId: trip.id,
+    authorProfileId: "author-1",
+    authorName: "Author",
+    visibility: "collaborators"
+  });
+  const publicEntry = normalizeEntry({
+    id: "entry-public",
+    tripId: trip.id,
+    authorProfileId: "author-1",
+    authorName: "Author",
+    visibility: "public"
+  });
+
+  assert.equal(canViewerSeeEntry(privateEntry, trip, { profileId: "author-1" }), true);
+  assert.equal(canViewerSeeEntry(privateEntry, trip, { profileId: "viewer-1" }), false);
+  assert.equal(canViewerSeeEntry(collaboratorEntry, trip, { profileId: "collab-1" }), true);
+  assert.equal(canViewerSeeEntry(collaboratorEntry, trip, { access: "collaborator" }), true);
+  assert.equal(canViewerSeeEntry(collaboratorEntry, trip, { profileId: "viewer-1" }), false);
+  assert.equal(canViewerSeeEntry(publicEntry, trip, { profileId: "viewer-1" }), true);
 });
 
 test("trips normalize collaborator records", () => {

@@ -1,5 +1,6 @@
 import {
   applyMutation,
+  canViewerSeeEntry,
   COMMENT_FIELDS,
   compareHlc,
   ENTRY_FIELDS,
@@ -8,6 +9,7 @@ import {
   normalizeCode,
   normalizeComment,
   normalizeEntry,
+  normalizeViewer,
   normalizeProfile,
   normalizeTrip,
   TRIP_FIELDS
@@ -60,7 +62,7 @@ export class PassageProfileRoom {
       }
 
       if (!route.action && request.method === "GET") {
-        return json(await this.materializedPayload(await this.requireRoom()), 200, cors);
+        return json(await this.materializedPayload(await this.requireRoom(), viewerFromRequest(request)), 200, cors);
       }
 
       if (route.action === "sync" && request.method === "GET") {
@@ -72,7 +74,7 @@ export class PassageProfileRoom {
       }
 
       if (route.action === "state" && request.method === "GET") {
-        return json(await this.materializedPayload(await this.requireRoom()), 200, cors);
+        return json(await this.materializedPayload(await this.requireRoom(), viewerFromRequest(request)), 200, cors);
       }
 
       if (route.action === "profile" && request.method === "POST") {
@@ -113,7 +115,7 @@ export class PassageProfileRoom {
   }
 
   async handleWebSocket(request) {
-    await this.requireRoom();
+    const room = await this.requireRoom();
 
     if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
       return json({ error: "Expected WebSocket upgrade" }, 426);
@@ -121,6 +123,7 @@ export class PassageProfileRoom {
 
     const pair = new WebSocketPair();
     const [client, server] = Object.values(pair);
+    if (room.type === "trip") rememberSocketViewer(server, viewerFromRequest(request));
     this.state.acceptWebSocket(server);
     return new Response(null, { status: 101, webSocket: client });
   }
@@ -129,17 +132,31 @@ export class PassageProfileRoom {
     const room = await this.requireRoom();
     const body = await request.json();
     const accepted = await this.acceptMutations(Array.isArray(body.mutations) ? body.mutations : [], room);
-    const materialized = room.type === "trip" ? materializeMutations(await this.listSince(""), room) : null;
+    const highWatermark = await this.highWatermark();
+
+    if (room.type === "trip") {
+      const materialized = filterTripStateForViewer(
+        materializeMutations(await this.listSince(""), room),
+        viewerFromSyncInput(request, body)
+      );
+      return json({
+        room,
+        code: room.code,
+        trip: materialized.trips[0] || null,
+        entries: materialized.entries,
+        comments: materialized.comments,
+        confirmedIds: accepted.map(mutation => mutation.id),
+        highWatermark
+      }, 200, cors);
+    }
+
     return json({
       room,
       code: room.code,
       profile: room.profile || null,
-      trip: materialized?.trips[0] || null,
-      entries: materialized?.entries || [],
-      comments: materialized?.comments || [],
       mutations: await this.listSince(typeof body.since === "string" ? body.since : ""),
       confirmedIds: accepted.map(mutation => mutation.id),
-      highWatermark: await this.highWatermark()
+      highWatermark
     }, 200, cors);
   }
 
@@ -151,6 +168,14 @@ export class PassageProfileRoom {
       const message = parseSocketMessage(raw);
 
       if (message.type === "sync") {
+        if (room.type === "trip") {
+          const viewer = normalizeViewer(message.viewer || socketViewer(socket));
+          rememberSocketViewer(socket, viewer);
+          socket.send(JSON.stringify({ type: "room", room }));
+          await this.sendTripSnapshot(socket, room, viewer);
+          return;
+        }
+
         socket.send(JSON.stringify({ type: "room", room }));
         socket.send(JSON.stringify({
           type: "mutations",
@@ -168,6 +193,17 @@ export class PassageProfileRoom {
           confirmedIds: accepted.map(mutation => mutation.id),
           highWatermark
         }));
+
+        if (room.type === "trip") {
+          const viewer = normalizeViewer(message.viewer || socketViewer(socket));
+          rememberSocketViewer(socket, viewer);
+          const materialized = materializeMutations(await this.listSince(""), room);
+          await this.sendTripSnapshot(socket, room, viewer, materialized, highWatermark);
+          if (accepted.length) {
+            await this.broadcastTripSnapshots(socket, room, materialized, highWatermark);
+          }
+          return;
+        }
 
         if (accepted.length) {
           this.broadcast(socket, {
@@ -198,6 +234,17 @@ export class PassageProfileRoom {
         } catch {
           // Ignore dead sockets.
         }
+      }
+    }
+  }
+
+  async broadcastTripSnapshots(sender, room, materialized, highWatermark) {
+    for (const socket of this.state.getWebSockets()) {
+      if (socket === sender) continue;
+      try {
+        await this.sendTripSnapshot(socket, room, socketViewer(socket), materialized, highWatermark);
+      } catch {
+        // Ignore dead sockets.
       }
     }
   }
@@ -250,7 +297,7 @@ export class PassageProfileRoom {
     return rows[0]?.timestamp || "";
   }
 
-  async materializedPayload(room) {
+  async materializedPayload(room, viewer = null) {
     const mutations = await this.listSince("");
     const state = materializeMutations(mutations, room);
     return room.type === "profile"
@@ -266,15 +313,7 @@ export class PassageProfileRoom {
         tripActivitySeenAt: state.tripActivitySeenAt || {},
         highWatermark: await this.highWatermark()
       }
-      : {
-        room,
-        code: room.code,
-        trip: state.trips[0] || null,
-        entries: state.entries,
-        comments: state.comments,
-        mutations,
-        highWatermark: await this.highWatermark()
-      };
+      : createTripSnapshotPayload(room, filterTripStateForViewer(state, viewer), await this.highWatermark());
   }
 
   async getRoom() {
@@ -289,6 +328,14 @@ export class PassageProfileRoom {
 
   async saveRoom(room) {
     await this.state.storage.put("room", room);
+  }
+
+  async sendTripSnapshot(socket, room, viewer, materialized = null, highWatermark = "") {
+    const state = filterTripStateForViewer(materialized || materializeMutations(await this.listSince(""), room), viewer);
+    socket.send(JSON.stringify({
+      type: "snapshot",
+      ...createTripSnapshotPayload(room, state, highWatermark || await this.highWatermark())
+    }));
   }
 
   async updateProfile(request, cors) {
@@ -1451,6 +1498,71 @@ async function responseError(response, fallback) {
 
 function photoAssetKey(assetId) {
   return `photos/${String(assetId || "").trim()}`;
+}
+
+function createTripSnapshotPayload(room, state, highWatermark = "") {
+  return {
+    room,
+    code: room.code,
+    trip: state.trips[0] || null,
+    entries: state.entries,
+    comments: state.comments,
+    highWatermark
+  };
+}
+
+export function filterTripStateForViewer(state, viewer = {}) {
+  const trip = state?.trips?.[0] || null;
+  if (!trip) {
+    return {
+      trips: [],
+      entries: [],
+      comments: []
+    };
+  }
+
+  const entries = Array.isArray(state?.entries)
+    ? state.entries.filter(entry => canViewerSeeEntry(entry, trip, viewer))
+    : [];
+  const entryIds = new Set(entries.map(entry => entry.id));
+  return {
+    trips: [trip],
+    entries,
+    comments: Array.isArray(state?.comments)
+      ? state.comments.filter(comment => entryIds.has(comment.entryId))
+      : []
+  };
+}
+
+function viewerFromRequest(request) {
+  const url = new URL(request.url);
+  return normalizeViewer({
+    profileId: url.searchParams.get("profileId") || "",
+    name: url.searchParams.get("profileName") || "",
+    access: url.searchParams.get("access") || ""
+  });
+}
+
+function viewerFromSyncInput(request, body) {
+  const requested = normalizeViewer(body?.viewer);
+  if (requested.profileId || requested.name || requested.access === "collaborator") return requested;
+  return viewerFromRequest(request);
+}
+
+function rememberSocketViewer(socket, viewer) {
+  try {
+    socket.serializeAttachment?.(normalizeViewer(viewer));
+  } catch {
+    // Attachments are optional; fall back to per-message viewer context.
+  }
+}
+
+function socketViewer(socket) {
+  try {
+    return normalizeViewer(socket.deserializeAttachment?.() || {});
+  } catch {
+    return normalizeViewer();
+  }
 }
 
 export function generateInviteCode(length = CODE_LENGTH) {

@@ -1,4 +1,4 @@
-import { applyMutations, compareHlc, normalizeCode } from "./model.js";
+import { applyMutations, compareHlc, normalizeCode, normalizeViewer } from "./model.js";
 import { loadSettings } from "./storage.js";
 
 const SYNC_PATH = "/sync";
@@ -6,7 +6,7 @@ const RETRY_MIN_MS = 1000;
 const RETRY_MAX_MS = 15000;
 
 export class PassageSync {
-  constructor({ kind = "profiles", code, state, syncState, save, onStatus, onChange, onRoom }) {
+  constructor({ kind = "profiles", code, state, syncState, save, onStatus, onChange, onRoom, onSnapshot, viewer }) {
     this.kind = kind;
     this.code = normalizeCode(code);
     this.state = state;
@@ -15,6 +15,8 @@ export class PassageSync {
     this.onStatus = onStatus;
     this.onChange = onChange;
     this.onRoom = onRoom;
+    this.onSnapshot = onSnapshot;
+    this.viewer = viewer;
     this.settings = loadSettings();
     this.socket = null;
     this.retryTimer = null;
@@ -85,7 +87,12 @@ export class PassageSync {
     this.setStatus("syncing");
 
     try {
-      this.socket = new WebSocket(getWebSocketUrl(this.settings.syncBaseUrl, this.kind, this.code));
+      this.socket = new WebSocket(getWebSocketUrl(
+        this.settings.syncBaseUrl,
+        this.kind,
+        this.code,
+        this.kind === "trips" ? this.currentViewer() : null
+      ));
     } catch {
       this.setStatus("offline");
       this.scheduleReconnect();
@@ -94,8 +101,12 @@ export class PassageSync {
 
     this.socket.addEventListener("open", () => {
       this.retryDelay = RETRY_MIN_MS;
-      this.send({ type: "sync", since: this.syncState().lastSyncTimestamp || "" });
-      this.pushQueued();
+      this.send({
+        type: "sync",
+        since: this.syncState().lastSyncTimestamp || "",
+        viewer: this.kind === "trips" ? this.currentViewer() : undefined
+      });
+      if (this.queue().length) this.pushQueued();
     });
 
     this.socket.addEventListener("message", event => {
@@ -129,6 +140,11 @@ export class PassageSync {
       return;
     }
 
+    if (message.type === "snapshot") {
+      this.applySnapshot(message.snapshot || message, message.highWatermark);
+      return;
+    }
+
     if (message.type === "ack" && Array.isArray(message.confirmedIds)) {
       this.confirm(message.confirmedIds, message.highWatermark);
       return;
@@ -146,12 +162,14 @@ export class PassageSync {
 
   async httpSync() {
     this.setStatus("syncing");
-    const response = await fetch(getRoomEndpoint(this.settings.syncBaseUrl, this.kind, this.code, SYNC_PATH), {
+    const viewer = this.kind === "trips" ? this.currentViewer() : null;
+    const response = await fetch(getRoomEndpoint(this.settings.syncBaseUrl, this.kind, this.code, SYNC_PATH, viewer), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         since: this.syncState().lastSyncTimestamp || "",
-        mutations: this.queue()
+        mutations: this.queue(),
+        viewer: viewer || undefined
       })
     });
 
@@ -160,7 +178,11 @@ export class PassageSync {
     const payload = await response.json();
     if (payload.room) this.onRoom?.(payload.room);
     if (Array.isArray(payload.confirmedIds)) this.confirm(payload.confirmedIds, payload.highWatermark, false);
-    if (Array.isArray(payload.mutations)) this.applyIncoming(payload.mutations, payload.highWatermark, false);
+    if (this.kind === "trips" && (payload.trip || Array.isArray(payload.entries) || Array.isArray(payload.comments))) {
+      this.applySnapshot(payload, payload.highWatermark, false);
+    } else if (Array.isArray(payload.mutations)) {
+      this.applyIncoming(payload.mutations, payload.highWatermark, false);
+    }
     this.persistAndNotify();
     this.setSettledStatus();
   }
@@ -168,13 +190,24 @@ export class PassageSync {
   pushQueued() {
     const queued = this.queue().filter(mutation => !this.inFlight.has(mutation.id));
     if (!queued.length) {
+      if (this.kind === "trips") {
+        this.send({
+          type: "sync",
+          since: this.syncState().lastSyncTimestamp || "",
+          viewer: this.currentViewer()
+        });
+      }
       this.setSettledStatus();
       return;
     }
 
     for (const mutation of queued) this.inFlight.add(mutation.id);
     this.setStatus("syncing");
-    this.send({ type: "push", mutations: queued });
+    this.send({
+      type: "push",
+      mutations: queued,
+      viewer: this.kind === "trips" ? this.currentViewer() : undefined
+    });
   }
 
   send(message) {
@@ -187,6 +220,13 @@ export class PassageSync {
     const changed = applyMutations(this.state, mutations);
     this.observeHighWatermark(highWatermark);
     if (changed || highWatermark) this.persistAndNotify(notify);
+    this.setSettledStatus();
+  }
+
+  applySnapshot(snapshot, highWatermark, notify = true) {
+    this.onSnapshot?.(snapshot);
+    this.observeHighWatermark(highWatermark || snapshot?.highWatermark);
+    this.persistAndNotify(notify);
     this.setSettledStatus();
   }
 
@@ -240,6 +280,11 @@ export class PassageSync {
   setQueue(next) {
     this.syncState().mutationQueue = next;
   }
+
+  currentViewer() {
+    const input = typeof this.viewer === "function" ? this.viewer() : this.viewer;
+    return normalizeViewer(input);
+  }
 }
 
 export async function createRemoteProfile({ profile, mutations }, settings = loadSettings()) {
@@ -284,8 +329,8 @@ export async function createRemoteTrip({ trip, entries, comments }, settings = l
   return response.json();
 }
 
-export async function fetchRemoteTrip(code, settings = loadSettings()) {
-  const response = await fetch(getRoomEndpoint(settings.syncBaseUrl, "trips", code, ""));
+export async function fetchRemoteTrip(code, settings = loadSettings(), viewer = null) {
+  const response = await fetch(getRoomEndpoint(settings.syncBaseUrl, "trips", code, "", viewer));
   if (!response.ok) throw new Error(await getErrorMessage(response));
   return response.json();
 }
@@ -325,8 +370,10 @@ function getEndpoint(syncBaseUrl, path) {
   return new URL(path, `${base}/`).toString();
 }
 
-function getRoomEndpoint(syncBaseUrl, kind, code, path) {
-  return getEndpoint(syncBaseUrl, `/api/${kind}/${encodeURIComponent(normalizeCode(code))}${path}`);
+function getRoomEndpoint(syncBaseUrl, kind, code, path, viewer = null) {
+  const url = new URL(getEndpoint(syncBaseUrl, `/api/${kind}/${encodeURIComponent(normalizeCode(code))}${path}`));
+  if (kind === "trips") addViewerQuery(url, viewer);
+  return url.toString();
 }
 
 function getAssetEndpoint(syncBaseUrl, assetId) {
@@ -335,10 +382,18 @@ function getAssetEndpoint(syncBaseUrl, assetId) {
   return getEndpoint(syncBaseUrl, `/api/assets/${encodeURIComponent(id)}`);
 }
 
-function getWebSocketUrl(syncBaseUrl, kind, code) {
+function getWebSocketUrl(syncBaseUrl, kind, code, viewer = null) {
   const url = new URL(`/api/${kind}/${encodeURIComponent(normalizeCode(code))}${SYNC_PATH}`, `${syncBaseUrl.replace(/\/+$/, "")}/`);
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+  if (kind === "trips") addViewerQuery(url, viewer);
   return url.toString();
+}
+
+function addViewerQuery(url, viewer) {
+  const currentViewer = normalizeViewer(viewer);
+  if (currentViewer.profileId) url.searchParams.set("profileId", currentViewer.profileId);
+  if (currentViewer.name) url.searchParams.set("profileName", currentViewer.name);
+  if (currentViewer.access === "collaborator") url.searchParams.set("access", currentViewer.access);
 }
 
 async function getErrorMessage(response) {

@@ -11,7 +11,7 @@ import {
 } from "./model.js";
 
 export const STATE_STORAGE_KEY = "passage_v1";
-export const SCHEMA_VERSION = 7;
+export const SCHEMA_VERSION = 8;
 
 export function createInitialState() {
   return {
@@ -180,7 +180,8 @@ function createSyncState(input = {}) {
   return {
     mutationQueue: Array.isArray(input.mutationQueue) ? input.mutationQueue.filter(isQueuedMutation) : [],
     lastSyncTimestamp: typeof input.lastSyncTimestamp === "string" ? input.lastSyncTimestamp : "",
-    tripId: typeof input.tripId === "string" ? input.tripId : ""
+    tripId: typeof input.tripId === "string" ? input.tripId : "",
+    accessMode: normalizeSyncAccessMode(input.accessMode)
   };
 }
 
@@ -219,6 +220,10 @@ function normalizeClock(clock) {
     wallTime: Number.isFinite(clock?.wallTime) ? clock.wallTime : 0,
     counter: Number.isFinite(clock?.counter) ? clock.counter : 0
   };
+}
+
+function normalizeSyncAccessMode(value) {
+  return String(value || "").trim().toLowerCase() === "collaborator" ? "collaborator" : "viewer";
 }
 
 function plainObject(value) {

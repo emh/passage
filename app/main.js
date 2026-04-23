@@ -1,6 +1,7 @@
 import {
   applyMutations,
   applyMutation,
+  canViewerSeeEntry,
   COMMENT_FIELDS,
   commentsForEntry,
   compareHlc,
@@ -19,13 +20,15 @@ import {
   normalizeCode,
   normalizeComment,
   normalizeEntry,
+  normalizeEntryVisibility,
+  observeHlc,
   normalizeProfile,
   normalizeTrip,
   normalizeUserName,
+  normalizeViewer,
   TRIP_FIELDS,
   toDateTimeInputValue,
   tripActivitySeenField,
-  tripEntryCounts,
   visibleComments,
   visibleEntries,
   visibleTrips
@@ -159,6 +162,26 @@ function hasProfileName() {
 
 function sharedSyncState(code, tripId = "") {
   return ensureSharedTripSyncState(state, code, tripId);
+}
+
+function setSharedTripAccessMode(code, accessMode = "viewer", tripId = "") {
+  const syncState = sharedSyncState(code, tripId);
+  if (String(accessMode || "").trim().toLowerCase() === "collaborator") {
+    syncState.accessMode = "collaborator";
+  }
+  return syncState;
+}
+
+function sharedTripAccessMode(code) {
+  return sharedSyncState(code).accessMode === "collaborator" ? "collaborator" : "viewer";
+}
+
+function sharedTripViewer(code) {
+  return normalizeViewer({
+    profileId: state.profile?.id || "",
+    name: state.profile?.name || "",
+    access: sharedTripAccessMode(code)
+  });
 }
 
 function toast(message) {
@@ -422,8 +445,38 @@ function getTrip(id) {
   return visibleTrips(state.trips).find(trip => trip.id === String(id)) || null;
 }
 
+function viewerForTrip(trip) {
+  return normalizeViewer({
+    profileId: state.profile?.id || "",
+    name: state.profile?.name || "",
+    access: trip?.sharedCode ? sharedTripAccessMode(trip.sharedCode) : "viewer"
+  });
+}
+
+function canViewEntry(entry, trip = getTrip(entry?.tripId)) {
+  return Boolean(entry && trip && canViewerSeeEntry(entry, trip, viewerForTrip(trip)));
+}
+
+function allVisibleEntries() {
+  return visibleEntries(state.entries).filter(entry => canViewEntry(entry, getTrip(entry.tripId)));
+}
+
+function visibleTripEntries(tripId) {
+  const trip = getTrip(tripId);
+  if (!trip) return [];
+  return entriesForTrip(state.entries, trip.id).filter(entry => canViewEntry(entry, trip));
+}
+
+function visibleTripEntryCounts(tripId) {
+  const count = visibleTripEntries(tripId).length;
+  return {
+    total: count,
+    journals: count
+  };
+}
+
 function getEntry(id) {
-  return visibleEntries(state.entries).find(entry => entry.id === String(id)) || null;
+  return allVisibleEntries().find(entry => entry.id === String(id)) || null;
 }
 
 function getComment(id) {
@@ -480,7 +533,7 @@ function dayKey(iso) {
 }
 
 function routeCities(trip) {
-  return uniqueLabels(entriesForTrip(state.entries, trip.id).map(entryRouteLabel).filter(Boolean));
+  return uniqueLabels(visibleTripEntries(trip.id).map(entryRouteLabel).filter(Boolean));
 }
 
 function routeLabel(trip) {
@@ -606,16 +659,25 @@ function entryLocationLabel(entry) {
 }
 
 function tripAuthors(tripId) {
-  return uniqueLabels(entriesForTrip(state.entries, tripId).map(entry => entry.authorName).filter(Boolean));
+  return uniqueLabels(visibleTripEntries(tripId).map(entry => entry.authorName).filter(Boolean));
 }
 
 function showEntryAuthors(tripId) {
-  return entriesForTrip(state.entries, tripId)
+  return visibleTripEntries(tripId)
     .some(entry => entry.authorName && !isCurrentProfile(entry.authorProfileId, entry.authorName));
+}
+
+function entryVisibilityLabel(entry) {
+  const visibility = normalizeEntryVisibility(entry?.visibility);
+  if (visibility === "private") return "PRIVATE";
+  if (visibility === "collaborators") return "COLLABORATORS";
+  return "";
 }
 
 function entryMetaLine(entry, options = {}) {
   const parts = [];
+  const visibility = entryVisibilityLabel(entry);
+  if (visibility) parts.push(visibility);
   if (options.includeAuthor && entry.authorName && !isCurrentProfile(entry.authorProfileId, entry.authorName)) {
     parts.push(entry.authorName);
   }
@@ -987,7 +1049,7 @@ function schedulePhotoWork() {
 }
 
 async function refreshPhotoAssets() {
-  const entries = visibleEntries(state.entries).filter(entryHasPhoto);
+  const entries = allVisibleEntries().filter(entryHasPhoto);
   await Promise.all(entries.map(async entry => {
     await Promise.all(entryPhotos(entry).map(async photo => {
       await ensureEntryPhotoCached(photo);
@@ -1067,7 +1129,7 @@ function queueEntryPhotoListUpdate(entry, photos) {
 }
 
 function geotaggedEntriesForTrip(tripId) {
-  return entriesForTrip(state.entries, tripId).filter(hasGeotag);
+  return visibleTripEntries(tripId).filter(hasGeotag);
 }
 
 function leaflet() {
@@ -1270,7 +1332,7 @@ function filteredTrips() {
 
 function renderStats() {
   const trips = visibleTrips(state.trips);
-  const entries = visibleEntries(state.entries).filter(entry => trips.some(trip => trip.id === entry.tripId));
+  const entries = allVisibleEntries().filter(entry => trips.some(trip => trip.id === entry.tripId));
   const cities = new Set();
   for (const trip of trips) {
     for (const city of routeCities(trip)) cities.add(city);
@@ -1293,7 +1355,7 @@ function renderList() {
 
   empty.hidden = true;
   container.innerHTML = list.map(trip => {
-    const counts = tripEntryCounts(state.entries, trip.id);
+    const counts = visibleTripEntryCounts(trip.id);
     const active = isTripActive(trip);
     const past = isTripPast(trip);
     const days = daysBetween(trip.startIso, trip.endIso);
@@ -1317,6 +1379,8 @@ function renderList() {
 }
 
 function entryComments(entryId) {
+  const entry = getEntry(entryId);
+  if (!entry || !canViewEntry(entry)) return [];
   return commentsForEntry(state.comments, entryId);
 }
 
@@ -1328,11 +1392,11 @@ function formatActivityTime(iso) {
 
 function activityItems(tripId = "") {
   const filterTripId = String(tripId || "").trim();
-  const entriesById = new Map(visibleEntries(state.entries).map(entry => [entry.id, entry]));
+  const entriesById = new Map(allVisibleEntries().map(entry => [entry.id, entry]));
   const tripsById = new Map(visibleTrips(state.trips).map(trip => [trip.id, trip]));
   const items = [];
 
-  for (const entry of visibleEntries(state.entries)) {
+  for (const entry of allVisibleEntries()) {
     if (filterTripId && entry.tripId !== filterTripId) continue;
     const trip = tripsById.get(entry.tripId);
     if (!trip) continue;
@@ -1574,7 +1638,7 @@ function backfillProfileIdentity() {
     queueEntityPatch("trip", trip, nextTrip, TRIP_FIELDS);
   }
 
-  for (const entry of visibleEntries(state.entries)) {
+  for (const entry of allVisibleEntries()) {
     if (entry.authorProfileId && entry.authorProfileId !== profileId) continue;
     const nextEntry = normalizeEntry({
       ...entry,
@@ -1628,7 +1692,7 @@ async function saveSetupName() {
 function hasLocalContent() {
   return Boolean(
     visibleTrips(state.trips).length ||
-    visibleEntries(state.entries).length ||
+    allVisibleEntries().length ||
     syncQueue().length ||
     Object.values(state.sharedTripSync || {}).some(syncState => syncState.mutationQueue?.length > 0)
   );
@@ -1669,7 +1733,77 @@ function applyRemotePayload(payload, options = {}) {
   }
 }
 
+function snapshotClockMap(fields, timestamp = "") {
+  if (!timestamp) return {};
+  const clocks = { _create: timestamp };
+  for (const field of fields) clocks[field] = timestamp;
+  return clocks;
+}
+
+function applySharedTripSnapshot(payload) {
+  const code = normalizeCode(payload?.code || payload?.room?.code || payload?.trip?.sharedCode);
+  const incomingTrip = payload?.trip ? normalizeTrip(payload.trip) : null;
+  const syncState = sharedSyncState(code, incomingTrip?.id || payload?.room?.tripId || "");
+  const tripId = String(incomingTrip?.id || syncState.tripId || payload?.room?.tripId || "");
+  if (!code && !tripId) return;
+  if (payload?.highWatermark) observeHlc(state, payload.highWatermark);
+
+  const existingEntryIds = new Set(state.entries
+    .filter(entry => entry.tripId === tripId)
+    .map(entry => entry.id));
+  const existingCommentIds = new Set(state.comments
+    .filter(comment => comment.tripId === tripId)
+    .map(comment => comment.id));
+
+  state.trips = state.trips.filter(trip => trip.id !== tripId);
+  state.entries = state.entries.filter(entry => entry.tripId !== tripId);
+  state.comments = state.comments.filter(comment => comment.tripId !== tripId);
+  delete state.tripClocks[tripId];
+  for (const entryId of existingEntryIds) delete state.entryClocks[entryId];
+  for (const commentId of existingCommentIds) delete state.commentClocks[commentId];
+
+  if (incomingTrip) {
+    state.trips.push(incomingTrip);
+    state.tripClocks[incomingTrip.id] = snapshotClockMap(TRIP_FIELDS, payload?.highWatermark);
+    syncState.tripId = incomingTrip.id;
+  }
+
+  const nextEntries = Array.isArray(payload?.entries)
+    ? payload.entries
+      .map(normalizeEntry)
+      .filter(entry => entry.tripId === tripId)
+    : [];
+  const entryIds = new Set(nextEntries.map(entry => entry.id));
+  for (const entry of nextEntries) {
+    state.entries.push(entry);
+    state.entryClocks[entry.id] = snapshotClockMap(ENTRY_FIELDS, payload?.highWatermark);
+  }
+
+  const nextComments = Array.isArray(payload?.comments)
+    ? payload.comments
+      .map(normalizeComment)
+      .filter(comment => comment.tripId === tripId && entryIds.has(comment.entryId))
+    : [];
+  for (const comment of nextComments) {
+    state.comments.push(comment);
+    state.commentClocks[comment.id] = snapshotClockMap(COMMENT_FIELDS, payload?.highWatermark);
+  }
+
+  for (const mutation of syncState.mutationQueue || []) {
+    applyMutation(state, mutation);
+  }
+
+  if (payload?.highWatermark && compareHlc(payload.highWatermark, syncState.lastSyncTimestamp) > 0) {
+    syncState.lastSyncTimestamp = payload.highWatermark;
+  }
+}
+
 function applySharedTripPayload(payload) {
+  if (payload?.trip || Array.isArray(payload?.entries) || Array.isArray(payload?.comments)) {
+    applySharedTripSnapshot(payload);
+    return;
+  }
+
   if (Array.isArray(payload?.mutations)) {
     applyMutations(state, payload.mutations);
   }
@@ -1685,11 +1819,13 @@ function applySharedTripPayload(payload) {
 function seedProfileQueueFromTrip(tripId) {
   const trip = getTrip(tripId);
   if (!trip) return;
+  const entries = visibleTripEntries(trip.id);
+  const entryIds = new Set(entries.map(entry => entry.id));
   syncQueue().push(createMutation(state, "trip", trip.id, "_create", trip));
-  for (const entry of entriesForTrip(state.entries, trip.id)) {
+  for (const entry of entries) {
     syncQueue().push(createMutation(state, "entry", entry.id, "_create", entry));
   }
-  for (const comment of visibleComments(state.comments).filter(comment => comment.tripId === trip.id)) {
+  for (const comment of visibleComments(state.comments).filter(comment => comment.tripId === trip.id && entryIds.has(comment.entryId))) {
     syncQueue().push(createMutation(state, "comment", comment.id, "_create", comment));
   }
 }
@@ -1704,6 +1840,7 @@ function currentCollaboratorRecord() {
 
 function ensureCurrentCollaborator(trip, options = {}) {
   if (!trip || !hasProfileName() || isTripOwner(trip) || isTripCollaborator(trip)) return false;
+  if (trip.sharedCode) setSharedTripAccessMode(trip.sharedCode, "collaborator", trip.id);
   const collaborators = [
     ...tripCollaborators(trip),
     currentCollaboratorRecord()
@@ -1772,8 +1909,9 @@ async function ensureTripShared(trip) {
 
   const payload = await createRemoteTrip({
     trip,
-    entries: entriesForTrip(state.entries, trip.id),
-    comments: visibleComments(state.comments).filter(comment => comment.tripId === trip.id)
+    entries: visibleTripEntries(trip.id),
+    comments: visibleComments(state.comments)
+      .filter(comment => comment.tripId === trip.id && getEntry(comment.entryId))
   }, state.settings);
 
   queueLocalMutation("trip", trip.id, "sharedCode", payload.code);
@@ -1794,8 +1932,9 @@ async function importSharedTrip(code, options = {}) {
     return;
   }
 
+  setSharedTripAccessMode(normalized, options.collaborator ? "collaborator" : "viewer");
   const existing = visibleTrips(state.trips).find(trip => trip.sharedCode === normalized);
-  const payload = await fetchRemoteTrip(normalized, state.settings);
+  const payload = await fetchRemoteTrip(normalized, state.settings, sharedTripViewer(normalized));
   applySharedTripPayload(payload);
 
   const trip = visibleTrips(state.trips).find(candidate => candidate.sharedCode === normalized || candidate.id === payload?.trip?.id);
@@ -1860,7 +1999,7 @@ function renderLinkScreen() {
     );
 
   if (incomingCode) {
-    const counts = `${plural(visibleTrips(state.trips).length, "trip")} | ${plural(visibleEntries(state.entries).length, "entry", "entries")}`;
+    const counts = `${plural(visibleTrips(state.trips).length, "trip")} | ${plural(allVisibleEntries().length, "entry", "entries")}`;
     $("link-body").innerHTML = `
       <button class="back-btn" data-action="cancel-link-device" type="button">BACK</button>
       <h2 class="screen-title">Link this device</h2>
@@ -2074,6 +2213,7 @@ function handleTripQuery() {
 
   const existing = visibleTrips(state.trips).find(trip => trip.sharedCode === code);
   if (existing) {
+    setSharedTripAccessMode(code, collabCode ? "collaborator" : "viewer", existing.id);
     if (collabCode) {
       ensureCurrentCollaborator(existing, { skipWritableCheck: true });
       saveAndFlushSync();
@@ -2136,9 +2276,9 @@ function renderTrip() {
   const trip = getTrip(state.currentTripId);
   if (!trip) return;
 
-  const entries = entriesForTrip(state.entries, trip.id);
+  const entries = visibleTripEntries(trip.id);
   const days = daysBetween(trip.startIso, trip.endIso);
-  const counts = tripEntryCounts(state.entries, trip.id);
+  const counts = visibleTripEntryCounts(trip.id);
   const sharedBy = tripSharedByLabel(trip);
   const readOnly = isReadOnlyTrip(trip);
   const owner = isTripOwner(trip);
@@ -2636,13 +2776,15 @@ function closeCompose() {
 function captureEntryFormDraft() {
   const titleInput = $("entry-title-input");
   const descriptionInput = $("entry-description-input");
+  const visibilityInput = $("entry-visibility-input");
   const urlInput = $("entry-url-input");
   const timeInput = $("entry-time-input");
-  if (!titleInput && !descriptionInput && !urlInput && !timeInput) return;
+  if (!titleInput && !descriptionInput && !visibilityInput && !urlInput && !timeInput) return;
 
   state.entryFormDraft = {
     title: titleInput?.value || "",
     description: descriptionInput?.value || "",
+    visibility: visibilityInput?.value || "public",
     url: urlInput?.value || "",
     timestampInput: timeInput?.value || ""
   };
@@ -2660,6 +2802,7 @@ function composeSnapshotFromEntry(entry) {
   return {
     title: String(entry?.title || "").trim(),
     description: entryDescription(entry).trim(),
+    visibility: normalizeEntryVisibility(entry?.visibility),
     url: String(entry?.url || "").trim(),
     linkPreview: linkPreviewSignature(entryLinkPreview(entry)),
     timestampInput: toDateTimeInputValue(timestamp),
@@ -2674,6 +2817,7 @@ function currentComposeSnapshot() {
   const initial = state.composeInitialSnapshot || composeSnapshotFromEntry(null);
   const title = String(state.entryFormDraft?.title || "").trim();
   const description = String(state.entryFormDraft?.description || "").trim();
+  const visibility = normalizeEntryVisibility(state.entryFormDraft?.visibility || initial.visibility);
   const url = String(state.entryFormDraft?.url || "").trim();
   const entry = state.composeEntryId ? getEntry(state.composeEntryId) : null;
   const linkPreview = linkPreviewSignature(currentLinkPreview(entry, url));
@@ -2684,6 +2828,7 @@ function currentComposeSnapshot() {
   return {
     title,
     description,
+    visibility,
     url,
     linkPreview,
     timestampInput,
@@ -2699,6 +2844,7 @@ function hasUnsavedComposeChanges() {
   const current = currentComposeSnapshot();
   return current.title !== initial.title ||
     current.description !== initial.description ||
+    current.visibility !== initial.visibility ||
     current.url !== initial.url ||
     current.linkPreview !== initial.linkPreview ||
     current.timestampInput !== initial.timestampInput ||
@@ -2921,6 +3067,21 @@ function renderUrlField(entry) {
   `;
 }
 
+function renderVisibilityField(entry) {
+  const value = normalizeEntryVisibility(entryFormValue(entry, "visibility", entry?.visibility || "public"));
+  return `
+    <label class="field">
+      <span class="field-label">Visibility</span>
+      <select class="field-input" id="entry-visibility-input">
+        <option value="public" ${value === "public" ? "selected" : ""}>Public</option>
+        <option value="collaborators" ${value === "collaborators" ? "selected" : ""}>Collaborators</option>
+        <option value="private" ${value === "private" ? "selected" : ""}>Private</option>
+      </select>
+      <span class="field-helper">public: anyone | collaborators: trip collaborators | private: only you</span>
+    </label>
+  `;
+}
+
 function renderLinkPreview(preview, options = {}) {
   if (!hasLinkPreview(preview)) return "";
   const mode = options.mode || "summary";
@@ -3037,6 +3198,8 @@ function renderCompose() {
       <span class="field-label">Description</span>
       <textarea class="field-textarea" id="entry-description-input" placeholder="write...">${esc(entryFormValue(entry, "description", entryDescription(entry)))}</textarea>
     </label>
+
+    ${renderVisibilityField(entry)}
 
     ${renderUrlField(entry)}
 
@@ -3162,6 +3325,7 @@ async function saveEntryFromForm() {
     title,
     description,
     body: description,
+    visibility: normalizeEntryVisibility($("entry-visibility-input")?.value || "public"),
     url,
     ...linkPreviewFields(linkPreview),
     ...photoFieldsFromList(photos),
@@ -3328,7 +3492,7 @@ function deleteCurrentTrip() {
   assertTripWritable(trip);
   if (!isTripOwner(trip)) throw new Error("Only the trip owner can delete this trip.");
 
-  for (const entry of entriesForTrip(state.entries, trip.id)) {
+  for (const entry of visibleTripEntries(trip.id)) {
     queueLocalMutation("entry", entry.id, "_delete", true);
   }
   queueLocalMutation("trip", trip.id, "_delete", true);
@@ -3648,6 +3812,7 @@ function configureSync() {
       code,
       state,
       syncState: () => sharedSyncState(code, tripId),
+      viewer: () => sharedTripViewer(code),
       save,
       onStatus() {},
       onChange: handleSyncChange,
@@ -3657,6 +3822,9 @@ function configureSync() {
           trip.sharedCode = room.code;
           handleSyncChange();
         }
+      },
+      onSnapshot(payload) {
+        applySharedTripPayload(payload);
       }
     });
     tripSyncs.set(code, sync);
