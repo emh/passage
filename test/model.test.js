@@ -214,6 +214,10 @@ test("entries normalize supported visibility values and default invalid ones to 
   assert.equal(normalizeEntry({ id: "entry-3", tripId: "trip-1", visibility: "friends" }).visibility, "public");
 });
 
+test("entries preserve skipped geotag status for location opt-out", () => {
+  assert.equal(normalizeEntry({ id: "entry-4", tripId: "trip-1", geotagStatus: "skipped" }).geotagStatus, "skipped");
+});
+
 test("entry visibility matches author, collaborators, and public viewers", () => {
   const trip = normalizeTrip({
     id: "trip-1",

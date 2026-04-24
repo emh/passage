@@ -998,6 +998,34 @@ h1 {
   margin-bottom: 20px;
 }
 
+.checkbox-field {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.checkbox-input {
+  width: 16px;
+  height: 16px;
+  margin-top: 2px;
+  accent-color: var(--link);
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+
+.checkbox-copy {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.checkbox-label {
+  margin-bottom: 2px;
+}
+
+.location-field-body {
+  margin-top: 12px;
+}
+
 .field-label {
   display: block;
   margin-bottom: 6px;

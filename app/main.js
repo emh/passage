@@ -76,6 +76,7 @@ const state = {
   setupError: "",
   isChangingEntryLocation: false,
   entryLocationDraft: null,
+  entryLocationEnabled: true,
   entryLocationQuery: "",
   entryLocationError: "",
   entryFormDraft: null,
@@ -1288,6 +1289,11 @@ function renderComposeMap() {
   if (!container) return;
 
   const entry = state.composeEntryId ? getEntry(state.composeEntryId) : null;
+  if (!isComposeLocationEnabled(entry)) {
+    renderMapUnavailable(container, "location tagging off for this entry");
+    return;
+  }
+
   if (state.entryLocationDraft && hasGeotag(state.entryLocationDraft)) {
     composeMap = renderSinglePointMap({
       container,
@@ -2782,6 +2788,7 @@ function openCompose(entryId = "") {
   state.composeEntryId = entryId;
   state.isChangingEntryLocation = false;
   state.entryLocationDraft = null;
+  state.entryLocationEnabled = composeLocationEnabledFromEntry(entry);
   state.entryLocationQuery = "";
   state.entryLocationError = "";
   state.entryFormDraft = null;
@@ -2816,6 +2823,7 @@ function closeCompose() {
   state.composeEntryId = null;
   state.isChangingEntryLocation = false;
   state.entryLocationDraft = null;
+  state.entryLocationEnabled = true;
   state.entryLocationQuery = "";
   state.entryLocationError = "";
   state.entryFormDraft = null;
@@ -2852,8 +2860,17 @@ function entryFormValue(entry, field, fallback = "") {
   return fallback;
 }
 
+function composeLocationEnabledFromEntry(entry) {
+  return entry?.geotagStatus !== "skipped";
+}
+
+function isComposeLocationEnabled(entry = state.composeEntryId ? getEntry(state.composeEntryId) : null) {
+  return state.entryLocationEnabled ?? composeLocationEnabledFromEntry(entry);
+}
+
 function composeSnapshotFromEntry(entry) {
   const timestamp = entry?.timestamp || new Date().toISOString();
+  const locationEnabled = composeLocationEnabledFromEntry(entry);
   return {
     title: String(entry?.title || "").trim(),
     description: entryDescription(entry).trim(),
@@ -2861,7 +2878,8 @@ function composeSnapshotFromEntry(entry) {
     url: String(entry?.url || "").trim(),
     linkPreview: linkPreviewSignature(entryLinkPreview(entry)),
     timestampInput: toDateTimeInputValue(timestamp),
-    location: locationSignature(entry),
+    locationEnabled,
+    location: locationEnabled ? locationSignature(entry) : "",
     photos: photoListSignature(entryPhotos(entry))
   };
 }
@@ -2877,7 +2895,10 @@ function currentComposeSnapshot() {
   const entry = state.composeEntryId ? getEntry(state.composeEntryId) : null;
   const linkPreview = linkPreviewSignature(currentLinkPreview(entry, url));
   const timestampInput = String(state.entryFormDraft?.timestampInput || initial.timestampInput || "").trim();
-  const location = state.entryLocationDraft ? locationSignature(state.entryLocationDraft) : initial.location;
+  const locationEnabled = isComposeLocationEnabled(entry);
+  const location = locationEnabled
+    ? (state.entryLocationDraft ? locationSignature(state.entryLocationDraft) : initial.location)
+    : "";
   const photos = photoListSignature(composePhotoList(entry));
 
   return {
@@ -2887,6 +2908,7 @@ function currentComposeSnapshot() {
     url,
     linkPreview,
     timestampInput,
+    locationEnabled,
     location,
     photos
   };
@@ -2903,6 +2925,7 @@ function hasUnsavedComposeChanges() {
     current.url !== initial.url ||
     current.linkPreview !== initial.linkPreview ||
     current.timestampInput !== initial.timestampInput ||
+    current.locationEnabled !== initial.locationEnabled ||
     current.location !== initial.location ||
     current.photos !== initial.photos;
 }
@@ -2920,8 +2943,39 @@ function locationSignature(location) {
   });
 }
 
+function emptyEntryLocationFields(status = "") {
+  return {
+    lat: null,
+    lng: null,
+    locationQuery: "",
+    locationDisplayName: "",
+    locationCity: "",
+    locationRegion: "",
+    locationCountry: "",
+    locationAccuracy: null,
+    geotaggedAt: "",
+    geotagStatus: status
+  };
+}
+
+function locationFieldsFromDraft(location) {
+  return {
+    lat: location.lat,
+    lng: location.lng,
+    locationQuery: location.locationQuery,
+    locationDisplayName: location.locationDisplayName,
+    locationCity: location.locationCity,
+    locationRegion: location.locationRegion,
+    locationCountry: location.locationCountry,
+    locationAccuracy: location.locationAccuracy,
+    geotaggedAt: location.geotaggedAt,
+    geotagStatus: location.geotagStatus
+  };
+}
+
 function renderLocationField(entry, label) {
-  const canChange = true;
+  const enabled = isComposeLocationEnabled(entry);
+  const canChange = enabled;
   const changing = canChange && state.isChangingEntryLocation;
   const draft = state.entryLocationDraft;
   const displayLabel = draft ? entryLocationLabel(draft) : label;
@@ -2930,20 +2984,33 @@ function renderLocationField(entry, label) {
 
   return `
     <div class="field">
-      <div class="field-label-row">
-        <span class="field-label">Location</span>
-        ${canChange && !changing ? '<button class="inline-link" data-action="change-entry-location" type="button">CHANGE</button>' : ""}
-      </div>
-      <span class="field-helper ${state.entryLocationError ? "accent" : ""}">${esc(helper)}</span>
-      ${changing ? `
-        <div class="location-edit-form">
-          <input class="field-input" id="location-query-input" value="${esc(query)}" placeholder="address, place, or city" autocomplete="street-address">
-          <div class="action-row compact">
-            <button class="action-link" data-action="geocode-entry-location" type="button">FIND</button>
-            <button class="action-link secondary" data-action="cancel-location-change" type="button">CANCEL</button>
+      <label class="checkbox-field">
+        <input class="checkbox-input" id="entry-location-enabled-input" type="checkbox" ${enabled ? "checked" : ""}>
+        <span class="checkbox-copy">
+          <span class="field-label checkbox-label">Tag location</span>
+          <span class="field-helper">On by default. Turn it off to save this post without a location.</span>
+        </span>
+      </label>
+      ${enabled ? `
+        <div class="location-field-body">
+          <div class="field-label-row">
+            <span class="field-label">Location</span>
+            ${canChange && !changing ? '<button class="inline-link" data-action="change-entry-location" type="button">CHANGE</button>' : ""}
           </div>
+          <span class="field-helper ${state.entryLocationError ? "accent" : ""}">${esc(helper)}</span>
+          ${changing ? `
+            <div class="location-edit-form">
+              <input class="field-input" id="location-query-input" value="${esc(query)}" placeholder="address, place, or city" autocomplete="street-address">
+              <div class="action-row compact">
+                <button class="action-link" data-action="geocode-entry-location" type="button">FIND</button>
+                <button class="action-link secondary" data-action="cancel-location-change" type="button">CANCEL</button>
+              </div>
+            </div>
+          ` : ""}
         </div>
-      ` : ""}
+      ` : `
+        <span class="field-helper">Location will not be attached to this entry.</span>
+      `}
     </div>
   `;
 }
@@ -3050,6 +3117,7 @@ async function ensureEntryUrlMetadataForSave(value, entry) {
 
 function applyPlaceLocationFromUrlInspection(payload, url) {
   const location = locationDraftFromInspectedPlace(payload?.place);
+  if (!isComposeLocationEnabled()) return;
   if (!location || !shouldApplyUrlPlaceLocation(url)) return;
 
   state.entryLocationDraft = location;
@@ -3272,6 +3340,7 @@ function renderCompose() {
 }
 
 async function geocodeEntryLocationFromForm() {
+  if (!isComposeLocationEnabled()) return;
   captureEntryFormDraft();
   const input = $("location-query-input");
   const query = input?.value || "";
@@ -3323,7 +3392,7 @@ async function selectEntryPhotos(files) {
   }
 
   const firstLocated = processed.find(item => Number.isFinite(item.exif?.lat) && Number.isFinite(item.exif?.lng));
-  if (firstLocated && !state.entryLocationDraft) {
+  if (firstLocated && !state.entryLocationDraft && isComposeLocationEnabled()) {
     const lat = firstLocated.exif.lat;
     const lng = firstLocated.exif.lng;
     try {
@@ -3388,25 +3457,17 @@ async function saveEntryFromForm() {
     dateUpdated: new Date().toISOString()
   };
 
-  if (state.entryLocationDraft) {
-    Object.assign(fields, {
-      lat: state.entryLocationDraft.lat,
-      lng: state.entryLocationDraft.lng,
-      locationQuery: state.entryLocationDraft.locationQuery,
-      locationDisplayName: state.entryLocationDraft.locationDisplayName,
-      locationCity: state.entryLocationDraft.locationCity,
-      locationRegion: state.entryLocationDraft.locationRegion,
-      locationCountry: state.entryLocationDraft.locationCountry,
-      locationAccuracy: state.entryLocationDraft.locationAccuracy,
-      geotaggedAt: state.entryLocationDraft.geotaggedAt,
-      geotagStatus: state.entryLocationDraft.geotagStatus
-    });
-  }
-
   if (state.composeEntryId) {
     const index = state.entries.findIndex(entry => entry.id === state.composeEntryId);
     if (index < 0) return;
     if (!canManageEntry(state.entries[index])) throw new Error("You cannot edit this entry.");
+    if (!isComposeLocationEnabled(state.entries[index])) {
+      Object.assign(fields, emptyEntryLocationFields("skipped"));
+    } else if (state.entryLocationDraft) {
+      Object.assign(fields, locationFieldsFromDraft(state.entryLocationDraft));
+    } else if (state.entries[index].geotagStatus === "skipped") {
+      Object.assign(fields, emptyEntryLocationFields(""));
+    }
     const nextEntry = normalizeEntry({
       ...state.entries[index],
       ...fields
@@ -3414,18 +3475,24 @@ async function saveEntryFromForm() {
     queueEntityPatch("entry", state.entries[index], nextEntry, ENTRY_FIELDS);
     toast("entry updated");
   } else {
-    const position = state.entryLocationDraft ? null : await positionForNewEntry();
-    if (position && !state.entryLocationDraft) {
-      fields.lat = position.lat;
-      fields.lng = position.lng;
-      fields.locationAccuracy = position.accuracy;
-      fields.geotaggedAt = position.capturedAt;
-      fields.geotagStatus = "ready";
-      fields.locationCity = "";
-      fields.locationRegion = "";
-      fields.locationCountry = "";
+    if (!isComposeLocationEnabled()) {
+      Object.assign(fields, emptyEntryLocationFields("skipped"));
+    } else if (state.entryLocationDraft) {
+      Object.assign(fields, locationFieldsFromDraft(state.entryLocationDraft));
     } else {
-      fields.geotagStatus = state.geolocationStatus === "denied" ? "denied" : "unavailable";
+      const position = await positionForNewEntry();
+      if (position) {
+        fields.lat = position.lat;
+        fields.lng = position.lng;
+        fields.locationAccuracy = position.accuracy;
+        fields.geotaggedAt = position.capturedAt;
+        fields.geotagStatus = "ready";
+        fields.locationCity = "";
+        fields.locationRegion = "";
+        fields.locationCountry = "";
+      } else {
+        fields.geotagStatus = state.geolocationStatus === "denied" ? "denied" : "unavailable";
+      }
     }
     fields.authorProfileId = state.profile?.id || "";
     fields.authorName = state.profile?.name || "";
@@ -4047,6 +4114,7 @@ function bindEvents() {
     if (!action) return;
     if (action.dataset.action === "compose-back") return requestCloseCompose();
     if (action.dataset.action === "change-entry-location") {
+      if (!isComposeLocationEnabled()) return;
       captureEntryFormDraft();
       clearConfirmation("compose");
       state.isChangingEntryLocation = true;
@@ -4116,6 +4184,20 @@ function bindEvents() {
   });
 
   $("compose-overlay").addEventListener("change", event => {
+    if (event.target?.id === "entry-location-enabled-input") {
+      captureEntryFormDraft();
+      clearConfirmation("compose");
+      state.entryLocationEnabled = Boolean(event.target.checked);
+      state.isChangingEntryLocation = state.entryLocationEnabled ? state.isChangingEntryLocation : false;
+      state.entryLocationError = "";
+      renderCompose();
+      if (state.entryLocationEnabled && !state.composeEntryId) {
+        requestLocationForNewEntry();
+      }
+      requestAnimationFrame(() => $("entry-location-enabled-input")?.focus());
+      return;
+    }
+
     if (event.target?.id !== "entry-photo-input") return;
     const files = event.target.files;
     if (!files?.length) return;
