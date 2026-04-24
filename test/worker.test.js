@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  buildShareMetadata,
   filterTripStateForViewer,
   materializeMutations,
   normalizeExternalUrl,
@@ -9,6 +10,7 @@ import {
   normalizeTripRoom,
   parseAssetRoute,
   parseRoomRoute,
+  parseShareRoute,
   parseSocialMetadata,
   validateMutation
 } from "../workers/sync/src/index.js";
@@ -24,6 +26,27 @@ test("room routes extract profile code and action", () => {
 test("asset routes extract photo asset ids", () => {
   assert.deepEqual(parseAssetRoute("/api/assets/photo-123_ABC.jpg"), { assetId: "photo-123_ABC.jpg" });
   assert.equal(parseAssetRoute("/api/profiles/AB12"), null);
+});
+
+test("share routes extract trip, collaborator, and entry targets", () => {
+  assert.deepEqual(parseShareRoute("/share/trips/ab12"), {
+    code: "AB12",
+    access: "viewer",
+    entryId: "",
+    kind: "trip"
+  });
+  assert.deepEqual(parseShareRoute("/share/trips/ab12/collab"), {
+    code: "AB12",
+    access: "collaborator",
+    entryId: "",
+    kind: "trip"
+  });
+  assert.deepEqual(parseShareRoute("/share/trips/trip12/entries/entry-1"), {
+    code: "TRIP12",
+    access: "viewer",
+    entryId: "entry-1",
+    kind: "entry"
+  });
 });
 
 test("URL metadata helpers normalize public URLs and parse social tags", () => {
@@ -72,6 +95,54 @@ test("trip rooms normalize share metadata and restrict to one trip", () => {
     field: "_create",
     value: { id: "trip-2", title: "Wrong trip", startIso: "2026-04-01", endIso: "2026-04-03" }
   }), room), /Invalid trip/);
+});
+
+test("share metadata uses trip details and prefers uploaded entry photos", () => {
+  const snapshot = {
+    trip: {
+      id: "trip-1",
+      title: "Todos Santos",
+      ownerName: "Evan"
+    },
+    entries: [
+      {
+        id: "entry-1",
+        tripId: "trip-1",
+        title: "Sunrise surf",
+        visibility: "public",
+        timestamp: "2026-04-01T08:00:00.000Z",
+        photoAssetId: "photo-1",
+        photoUploadedAt: "2026-04-01T08:05:00.000Z"
+      },
+      {
+        id: "entry-2",
+        tripId: "trip-1",
+        title: "Later lunch",
+        visibility: "public",
+        timestamp: "2026-04-01T12:00:00.000Z",
+        photoAssetId: "photo-2",
+        photoUploadedAt: "2026-04-01T12:05:00.000Z"
+      }
+    ]
+  };
+
+  const tripMetadata = buildShareMetadata(
+    snapshot,
+    { code: "TRIP12", access: "viewer", entryId: "", kind: "trip" },
+    "https://passage-sync.example/share/trips/TRIP12"
+  );
+  assert.equal(tripMetadata.title, "Follow along on Evan's trip: Todos Santos.");
+  assert.equal(tripMetadata.description, "Open the full trip in Passage.");
+  assert.equal(tripMetadata.imageUrl, "https://passage-sync.example/api/assets/photo-1");
+
+  const entryMetadata = buildShareMetadata(
+    snapshot,
+    { code: "TRIP12", access: "viewer", entryId: "entry-2", kind: "entry" },
+    "https://passage-sync.example/share/trips/TRIP12/entries/entry-2"
+  );
+  assert.equal(entryMetadata.title, "Later lunch");
+  assert.equal(entryMetadata.description, "From Evan's trip: Todos Santos.");
+  assert.equal(entryMetadata.imageUrl, "https://passage-sync.example/api/assets/photo-2");
 });
 
 test("trip rooms accept and materialize collaborator updates", () => {

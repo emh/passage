@@ -5,6 +5,7 @@ import {
   compareHlc,
   ENTRY_FIELDS,
   ENTITY_TYPES,
+  entriesForTrip,
   isProfileStateField,
   normalizeCode,
   normalizeComment,
@@ -369,6 +370,10 @@ export default {
     }
 
     const url = new URL(request.url);
+    const shareRoute = parseShareRoute(url.pathname);
+    if (request.method === "GET" && shareRoute) {
+      return handleSharePageRequest(request, env, shareRoute);
+    }
 
     if (request.method === "POST" && url.pathname === "/api/profiles") {
       return createRoomWithFreshCode(request, env, cors, "profiles");
@@ -434,10 +439,280 @@ export function parseRoomRoute(pathname) {
   };
 }
 
+export function parseShareRoute(pathname) {
+  const match = /^\/share\/trips\/([A-Za-z0-9]+)(?:\/(collab))?(?:\/entries\/([A-Za-z0-9._-]+))?\/?$/.exec(pathname);
+  if (!match) return null;
+  const entryId = String(match[3] || "").trim();
+  return {
+    code: normalizeCode(match[1]),
+    access: match[2] ? "collaborator" : "viewer",
+    entryId,
+    kind: entryId ? "entry" : "trip"
+  };
+}
+
 export function parseAssetRoute(pathname) {
   const match = /^\/api\/assets\/([A-Za-z0-9._-]+)\/?$/.exec(pathname);
   if (!match) return null;
   return { assetId: match[1] };
+}
+
+async function handleSharePageRequest(request, env, route) {
+  try {
+    const snapshot = await fetchTripSnapshotForShare(route.code, env);
+    const metadata = buildShareMetadata(snapshot, route, request.url);
+    const redirectUrl = buildShareRedirectUrl(request, route, env);
+    return html(renderSharePage(metadata, redirectUrl), 200, {
+      "Cache-Control": "no-store, max-age=0"
+    });
+  } catch (error) {
+    const metadata = {
+      title: "Passage share link",
+      description: messageFromError(error),
+      imageUrl: "",
+      url: request.url
+    };
+    return html(renderSharePage(metadata, buildShareRedirectUrl(request, route, env), {
+      buttonLabel: "Open Passage",
+      redirectDelayMs: 0
+    }), error?.status || 404, {
+      "Cache-Control": "no-store, max-age=0"
+    });
+  }
+}
+
+async function fetchTripSnapshotForShare(code, env) {
+  const normalized = normalizeCode(code);
+  if (!normalized) throw statusError("Share link is invalid", 400);
+
+  const id = env.PASSAGE_PROFILE_ROOM.idFromName(`trips:${normalized}`);
+  const room = env.PASSAGE_PROFILE_ROOM.get(id);
+  const url = new URL(`https://passage.invalid/api/trips/${normalized}`);
+  url.searchParams.set("access", "viewer");
+
+  const response = await room.fetch(new Request(url, { method: "GET" }));
+  if (!response.ok) {
+    throw statusError(response.status === 404 ? "Shared trip not found" : "Share link could not be loaded", response.status);
+  }
+
+  return response.json();
+}
+
+export function buildShareMetadata(snapshot, route, requestUrl = "") {
+  const trip = snapshot?.trip ? normalizeTrip(snapshot.trip) : null;
+  if (!trip) throw statusError("Shared trip not found", 404);
+
+  const entries = entriesForTrip(Array.isArray(snapshot?.entries) ? snapshot.entries : [], trip.id);
+  const selectedEntry = route?.entryId
+    ? entries.find(entry => entry.id === route.entryId) || null
+    : null;
+
+  if (selectedEntry) {
+    return {
+      title: entryShareTitle(selectedEntry, trip),
+      description: entryShareDescription(trip),
+      imageUrl: firstValue(
+        shareImageUrlForEntry(selectedEntry, requestUrl),
+        shareImageUrlForEntries(entries, requestUrl)
+      ),
+      url: requestUrl
+    };
+  }
+
+  return {
+    title: tripShareTitle(trip, route?.access),
+    description: "Open the full trip in Passage.",
+    imageUrl: shareImageUrlForEntries(entries, requestUrl),
+    url: requestUrl
+  };
+}
+
+function buildShareRedirectUrl(request, route, env) {
+  const url = new URL(request.url);
+  const appBaseUrl = normalizeShareAppUrl(url.searchParams.get("app")) ||
+    normalizeShareAppUrl(stringOr(env.APP_BASE_URL, "")) ||
+    `${url.origin}/`;
+  const target = new URL(appBaseUrl);
+  target.search = "";
+  target.hash = "";
+  target.searchParams.set(route?.access === "collaborator" ? "collab" : "trip", normalizeCode(route?.code));
+  if (route?.entryId) target.searchParams.set("entry", String(route.entryId));
+  return target.toString();
+}
+
+function normalizeShareAppUrl(value) {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  try {
+    const url = new URL(text);
+    return ["http:", "https:"].includes(url.protocol) ? url.toString() : "";
+  } catch {
+    return "";
+  }
+}
+
+function tripShareTitle(trip, access = "viewer") {
+  const ownerName = cleanWhitespace(trip?.ownerName || "");
+  const tripTitle = cleanWhitespace(trip?.title || "Untitled trip");
+  const prefix = access === "collaborator" ? "Join" : "Follow along on";
+  return ownerName
+    ? `${prefix} ${possessive(ownerName)} trip: ${tripTitle}.`
+    : `${prefix} this trip: ${tripTitle}.`;
+}
+
+function entryShareDescription(trip) {
+  const ownerName = cleanWhitespace(trip?.ownerName || "");
+  const tripTitle = cleanWhitespace(trip?.title || "Untitled trip");
+  return ownerName
+    ? `From ${possessive(ownerName)} trip: ${tripTitle}.`
+    : `From this trip: ${tripTitle}.`;
+}
+
+function possessive(name) {
+  const text = cleanWhitespace(name);
+  if (!text) return "";
+  return /s$/i.test(text) ? `${text}'` : `${text}'s`;
+}
+
+function entryShareTitle(entry, trip) {
+  const title = cleanWhitespace(entry?.title || "");
+  if (title) return title;
+
+  const description = cleanWhitespace(entry?.description || entry?.body || "");
+  if (description) return truncateText(description, 90);
+  return trip?.title || "Trip update";
+}
+
+function shareImageUrlForEntries(entries, requestUrl) {
+  for (const entry of entries) {
+    const imageUrl = shareImageUrlForEntry(entry, requestUrl);
+    if (imageUrl) return imageUrl;
+  }
+  return "";
+}
+
+function shareImageUrlForEntry(entry, requestUrl) {
+  for (const photo of entryPhotos(entry)) {
+    if (!photo.photoAssetId || !photo.photoUploadedAt) continue;
+    try {
+      return new URL(`/api/assets/${encodeURIComponent(photo.photoAssetId)}`, requestUrl).toString();
+    } catch {
+      // Fall through to the next image source.
+    }
+  }
+
+  return absoluteHttpUrl(entry?.linkPreviewImageUrl, requestUrl);
+}
+
+function entryPhotos(entry) {
+  const photos = Array.isArray(entry?.photos) ? entry.photos.filter(photo => photo?.photoAssetId) : [];
+  if (photos.length) return photos;
+  return entry?.photoAssetId ? [{
+    photoAssetId: entry.photoAssetId,
+    photoUploadedAt: entry.photoUploadedAt || "",
+    photoMime: entry.photoMime || "",
+    photoWidth: entry.photoWidth || null,
+    photoHeight: entry.photoHeight || null,
+    photoSize: entry.photoSize || null
+  }] : [];
+}
+
+function truncateText(value, limit = 120) {
+  const text = cleanWhitespace(value);
+  if (text.length <= limit) return text;
+  return `${text.slice(0, Math.max(0, limit - 1)).trimEnd()}...`;
+}
+
+function renderSharePage(metadata, redirectUrl, options = {}) {
+  const redirectDelayMs = Number.isFinite(options.redirectDelayMs) ? options.redirectDelayMs : 60;
+  const buttonLabel = options.buttonLabel || "Open in Passage";
+  const title = metadata?.title || "Passage share link";
+  const description = metadata?.description || "Open this shared trip in Passage.";
+  const imageUrl = metadata?.imageUrl || "";
+  const shareUrl = metadata?.url || "";
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>${escapeHtml(title)}</title>
+  <meta name="description" content="${escapeHtml(description)}">
+  <meta name="robots" content="noindex,nofollow">
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="${escapeHtml(title)}">
+  <meta property="og:description" content="${escapeHtml(description)}">
+  ${shareUrl ? `<meta property="og:url" content="${escapeHtml(shareUrl)}">` : ""}
+  ${imageUrl ? `<meta property="og:image" content="${escapeHtml(imageUrl)}">` : ""}
+  <meta name="twitter:card" content="${imageUrl ? "summary_large_image" : "summary"}">
+  <meta name="twitter:title" content="${escapeHtml(title)}">
+  <meta name="twitter:description" content="${escapeHtml(description)}">
+  ${imageUrl ? `<meta name="twitter:image" content="${escapeHtml(imageUrl)}">` : ""}
+  <style>
+    :root {
+      color-scheme: light;
+      font-family: Georgia, "Times New Roman", serif;
+      background: #f7f1e3;
+      color: #1e1a16;
+    }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      background:
+        radial-gradient(circle at top, rgba(183, 132, 71, 0.18), transparent 38%),
+        linear-gradient(180deg, #fbf7ec 0%, #efe3cb 100%);
+      padding: 24px;
+    }
+    main {
+      width: min(100%, 520px);
+      background: rgba(255, 252, 244, 0.88);
+      border: 1px solid rgba(60, 38, 20, 0.12);
+      border-radius: 24px;
+      box-shadow: 0 24px 60px rgba(73, 49, 27, 0.12);
+      padding: 28px;
+      backdrop-filter: blur(8px);
+    }
+    h1 {
+      margin: 0 0 12px;
+      font-size: clamp(2rem, 5vw, 2.8rem);
+      line-height: 0.95;
+      text-transform: lowercase;
+      letter-spacing: -0.04em;
+    }
+    p {
+      margin: 0 0 18px;
+      font-size: 1rem;
+      line-height: 1.5;
+    }
+    a {
+      display: inline-block;
+      padding: 12px 18px;
+      border-radius: 999px;
+      background: #1e1a16;
+      color: #fffaf1;
+      text-decoration: none;
+      font-size: 0.95rem;
+      letter-spacing: 0.02em;
+    }
+  </style>
+  <script>
+    window.addEventListener("load", function () {
+      window.setTimeout(function () {
+        window.location.replace(${JSON.stringify(redirectUrl)});
+      }, ${JSON.stringify(redirectDelayMs)});
+    });
+  </script>
+</head>
+<body>
+  <main>
+    <h1>${escapeHtml(title)}</h1>
+    <p>${escapeHtml(description)}</p>
+    <a href="${escapeHtml(redirectUrl)}">${escapeHtml(buttonLabel)}</a>
+  </main>
+</body>
+</html>`;
 }
 
 async function handleAssetRequest(request, env, cors, route) {
@@ -1802,6 +2077,25 @@ function json(payload, status = 200, headers = {}) {
       ...headers
     }
   });
+}
+
+function html(content, status = 200, headers = {}) {
+  return new Response(content, {
+    status,
+    headers: {
+      "Content-Type": "text/html; charset=utf-8",
+      ...headers
+    }
+  });
+}
+
+function escapeHtml(value) {
+  return String(value || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 function messageFromError(error) {

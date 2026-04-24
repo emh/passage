@@ -70,6 +70,7 @@ const state = {
   linkBusy: false,
   linkError: "",
   shareTripId: null,
+  shareEntryId: null,
   shareBusy: false,
   shareError: "",
   setupError: "",
@@ -575,6 +576,10 @@ function isTripCollaborator(trip) {
 
 function isReadOnlyTrip(trip) {
   return isTripSharedByOtherProfile(trip, state.profile) && !isTripCollaborator(trip);
+}
+
+function isEntryDirectShareable(entry) {
+  return normalizeEntryVisibility(entry?.visibility) === "public";
 }
 
 function isCommentAuthor(comment) {
@@ -1954,35 +1959,45 @@ async function importSharedTrip(code, options = {}) {
   saveAndFlushSync();
   renderAll();
   syncOpenViews();
-  showTrip(trip.id);
+  openSharedTripDestination(trip.id, options.entryId);
   toast(existing ? "Trip updated" : "Trip added");
+}
+
+function currentAppUrl() {
+  const url = new URL(globalThis.location.href);
+  url.search = "";
+  url.hash = "";
+  return url.toString();
 }
 
 function deviceLinkUrl() {
   if (!state.settings.syncBaseUrl || !state.profile?.code) return "";
-  const url = new URL(globalThis.location.href);
-  url.search = "";
-  url.hash = "";
+  const url = new URL(currentAppUrl());
   url.searchParams.set("link", state.profile.code);
   return url.toString();
 }
 
-function tripShareUrl(code) {
+function shareLandingUrl(pathname) {
   if (!state.settings.syncBaseUrl) return "";
-  const url = new URL(globalThis.location.href);
-  url.search = "";
-  url.hash = "";
-  url.searchParams.set("trip", normalizeCode(code));
+  const url = new URL(pathname, `${state.settings.syncBaseUrl.replace(/\/+$/, "")}/`);
+  const appUrl = currentAppUrl();
+  if (appUrl) url.searchParams.set("app", appUrl);
   return url.toString();
 }
 
+function tripShareUrl(code) {
+  return shareLandingUrl(`/share/trips/${encodeURIComponent(normalizeCode(code))}`);
+}
+
 function tripCollabUrl(code) {
-  if (!state.settings.syncBaseUrl) return "";
-  const url = new URL(globalThis.location.href);
-  url.search = "";
-  url.hash = "";
-  url.searchParams.set("collab", normalizeCode(code));
-  return url.toString();
+  return shareLandingUrl(`/share/trips/${encodeURIComponent(normalizeCode(code))}/collab`);
+}
+
+function entryShareUrl(code, entryId) {
+  const normalizedCode = normalizeCode(code);
+  const normalizedEntryId = String(entryId || "").trim();
+  if (!normalizedCode || !normalizedEntryId) return "";
+  return shareLandingUrl(`/share/trips/${encodeURIComponent(normalizedCode)}/entries/${encodeURIComponent(normalizedEntryId)}`);
 }
 
 function renderLinkScreen() {
@@ -2086,7 +2101,10 @@ function closeLinkScreen() {
 function renderShareScreen() {
   const trip = getTrip(state.shareTripId);
   if (!trip) return;
-  const viewerUrl = trip.sharedCode ? tripShareUrl(trip.sharedCode) : "";
+  const entry = state.shareEntryId ? getEntry(state.shareEntryId) : null;
+  const viewerUrl = trip.sharedCode
+    ? (entry ? entryShareUrl(trip.sharedCode, entry.id) : tripShareUrl(trip.sharedCode))
+    : "";
   const collaboratorUrl = trip.sharedCode ? tripCollabUrl(trip.sharedCode) : "";
   const helper = state.shareBusy
     ? "Preparing links..."
@@ -2095,15 +2113,22 @@ function renderShareScreen() {
         ? "Links will appear here."
         : "Sharing is not available here yet."
     );
+  const screenTitle = entry ? "Share entry" : "Share trip";
+  const routeLabel = entry
+    ? (entry.title || entryMetaLine(entry, { includeAuthor: false, includeDate: true }) || "Untitled entry")
+    : trip.title;
+  const viewerHelper = entry
+    ? "People with this link can open this entry and view the whole trip."
+    : "People with this link can read and comment. They cannot add or edit entries.";
 
   $("share-body").innerHTML = `
     <button class="back-btn" data-action="share-back" type="button">BACK</button>
-    <h2 class="screen-title">Share trip</h2>
-    <div class="trip-route" style="margin-bottom:20px;">${esc(trip.title)}</div>
+    <h2 class="screen-title">${esc(screenTitle)}</h2>
+    <div class="trip-route" style="margin-bottom:20px;">${esc(routeLabel)}</div>
 
     <div class="field">
       <span class="field-label">Viewer link</span>
-      <span class="field-helper">People with this link can read and comment. They cannot add or edit entries.</span>
+      <span class="field-helper">${esc(viewerHelper)}</span>
       <span class="field-helper break-anywhere">${esc(viewerUrl || helper)}</span>
       ${viewerUrl ? `
         <div class="action-row share-link-actions">
@@ -2112,16 +2137,18 @@ function renderShareScreen() {
       ` : ""}
     </div>
 
-    <div class="field">
-      <span class="field-label">Collaborator link</span>
-      <span class="field-helper">People with this link can add entries to this trip.</span>
-      <span class="field-helper break-anywhere">${esc(collaboratorUrl || helper)}</span>
-      ${collaboratorUrl ? `
-        <div class="action-row share-link-actions">
-          <button class="action-link" data-action="copy-share-link" data-share-kind="collaborator" type="button">COPY COLLABORATOR LINK</button>
-        </div>
-      ` : ""}
-    </div>
+    ${entry ? "" : `
+      <div class="field">
+        <span class="field-label">Collaborator link</span>
+        <span class="field-helper">People with this link can add entries to this trip.</span>
+        <span class="field-helper break-anywhere">${esc(collaboratorUrl || helper)}</span>
+        ${collaboratorUrl ? `
+          <div class="action-row share-link-actions">
+            <button class="action-link" data-action="copy-share-link" data-share-kind="collaborator" type="button">COPY COLLABORATOR LINK</button>
+          </div>
+        ` : ""}
+      </div>
+    `}
 
     ${state.shareError ? `
       <div class="field">
@@ -2131,18 +2158,25 @@ function renderShareScreen() {
   `;
 }
 
-async function openShareScreen(tripId) {
+async function openShareScreen({ tripId = "", entryId = "" } = {}) {
   if (!hasProfileName()) {
     openSetupScreen();
     return;
   }
-  state.shareTripId = tripId;
+  const entry = entryId ? getEntry(entryId) : null;
+  const trip = getTrip(tripId || entry?.tripId);
+  if (!trip) return;
+  if (entry && !isEntryDirectShareable(entry)) {
+    throw new Error("Only public entries can be shared directly right now.");
+  }
+
+  state.shareTripId = trip.id;
+  state.shareEntryId = entry?.id || null;
   state.shareError = "";
   renderShareScreen();
   openOverlay("share-overlay");
   requestAnimationFrame(() => $("share-body")?.focus());
 
-  const trip = getTrip(tripId);
   if (!trip || trip.sharedCode || !state.settings.syncBaseUrl || state.shareBusy) return;
 
   state.shareBusy = true;
@@ -2160,6 +2194,7 @@ async function openShareScreen(tripId) {
 function closeShareScreen() {
   state.shareBusy = false;
   state.shareTripId = null;
+  state.shareEntryId = null;
   state.shareError = "";
   closeOverlay("share-overlay");
 }
@@ -2173,10 +2208,19 @@ function stripLinkQuery() {
 
 function stripTripQuery() {
   const url = new URL(globalThis.location.href);
-  if (!url.searchParams.has("trip") && !url.searchParams.has("collab")) return;
+  if (!url.searchParams.has("trip") && !url.searchParams.has("collab") && !url.searchParams.has("entry")) return;
   url.searchParams.delete("trip");
   url.searchParams.delete("collab");
+  url.searchParams.delete("entry");
   globalThis.history?.replaceState?.({}, "", url);
+}
+
+function openSharedTripDestination(tripId, entryId = "") {
+  showTrip(tripId);
+  const id = String(entryId || "").trim();
+  if (!id) return;
+  const entry = getEntry(id);
+  if (entry?.tripId === tripId) openEntry(entry.id);
 }
 
 function handleLinkQuery() {
@@ -2203,6 +2247,7 @@ function handleTripQuery() {
   const params = new URLSearchParams(globalThis.location.search);
   const collabCode = normalizeCode(params.get("collab"));
   const code = collabCode || normalizeCode(params.get("trip"));
+  const entryId = String(params.get("entry") || "").trim();
   if (!code) return;
 
   if (collabCode && !hasProfileName()) {
@@ -2219,11 +2264,11 @@ function handleTripQuery() {
       saveAndFlushSync();
     }
     stripTripQuery();
-    showTrip(existing.id);
+    openSharedTripDestination(existing.id, entryId);
     return;
   }
 
-  runAction(() => importSharedTrip(code, { collaborator: Boolean(collabCode) }));
+  runAction(() => importSharedTrip(code, { collaborator: Boolean(collabCode), entryId }));
 }
 
 function handleIncomingQueries() {
@@ -2249,8 +2294,13 @@ async function copyDeviceLink() {
 
 async function copyShareLink(kind = "viewer") {
   const trip = getTrip(state.shareTripId);
+  const entry = state.shareEntryId ? getEntry(state.shareEntryId) : null;
   const url = trip?.sharedCode
-    ? (kind === "collaborator" ? tripCollabUrl(trip.sharedCode) : tripShareUrl(trip.sharedCode))
+    ? (
+      kind === "collaborator"
+        ? tripCollabUrl(trip.sharedCode)
+        : (entry ? entryShareUrl(trip.sharedCode, entry.id) : tripShareUrl(trip.sharedCode))
+    )
     : "";
   if (!url) throw new Error("Share link is not ready yet.");
   await navigator.clipboard.writeText(url);
@@ -2517,12 +2567,17 @@ function renderEntry() {
   const trip = getTrip(entry.tripId);
   const includeAuthor = showEntryAuthors(entry.tripId);
   const readOnly = isReadOnlyTrip(trip);
-  const actions = readOnly || !canManageEntry(entry)
-    ? ""
-    : `
-      <button class="action-link" data-action="edit-entry" type="button">EDIT</button>
-      <button class="action-link destructive" data-action="delete-entry" type="button">DELETE</button>
-    `;
+  const actions = [
+    isTripOwner(trip) && isEntryDirectShareable(entry)
+      ? '<button class="action-link" data-action="share-entry" type="button">SHARE</button>'
+      : "",
+    !readOnly && canManageEntry(entry)
+      ? '<button class="action-link" data-action="edit-entry" type="button">EDIT</button>'
+      : "",
+    !readOnly && canManageEntry(entry)
+      ? '<button class="action-link destructive" data-action="delete-entry" type="button">DELETE</button>'
+      : ""
+  ].filter(Boolean).join("");
 
   $("entry-body").innerHTML = `
     ${hasGeotag(entry) ? '<div class="map-panel compact"><div class="map-canvas" id="entry-map"></div></div>' : ""}
@@ -3695,7 +3750,7 @@ function syncOpenViews() {
     closeEntry();
   }
 
-  if (state.shareTripId && !getTrip(state.shareTripId)) {
+  if (state.shareTripId && (!getTrip(state.shareTripId) || (state.shareEntryId && !getEntry(state.shareEntryId)))) {
     closeShareScreen();
   }
 
@@ -3894,7 +3949,7 @@ function bindEvents() {
       if (action.dataset.action === "trip-back") return closeTrip();
       if (action.dataset.action === "open-trip-activity") return openActivityScreen({ tripId: action.dataset.tripId || state.currentTripId });
       if (action.dataset.action === "compose-journal") return runAction(() => openCompose());
-      if (action.dataset.action === "share-trip") return runAction(() => openShareScreen(state.currentTripId));
+      if (action.dataset.action === "share-trip") return runAction(() => openShareScreen({ tripId: state.currentTripId }));
       if (action.dataset.action === "edit-trip") return runAction(() => openTripForm());
       if (action.dataset.action === "toggle-entry-comments") return toggleEntryComments(action.dataset.entryId);
       if (action.dataset.action === "edit-comment") return startEditComment(action.dataset.commentId);
@@ -3916,6 +3971,7 @@ function bindEvents() {
       return;
     }
     if (action.dataset.action === "entry-back") return closeEntry();
+    if (action.dataset.action === "share-entry") return runAction(() => openShareScreen({ entryId: state.currentEntryId }));
     if (action.dataset.action === "edit-entry") {
       const entry = getEntry(state.currentEntryId);
       if (!entry) return;
