@@ -761,13 +761,21 @@ async function handleUrlMetadataRequest(request, env, cors) {
   const target = await fetchUrlMetadataTarget(targetUrl);
   const metadata = parseSocialMetadata(target.html, target.finalUrl || targetUrl);
   const place = await extractPlaceFromUrl(target, metadata, env);
+  const effectiveMetadata = googleShareMetadataOverride(place, metadata, targetUrl);
 
   return json({
     url: targetUrl,
     finalUrl: target.finalUrl || targetUrl,
-    metadata,
+    metadata: effectiveMetadata,
     place
   }, 200, cors);
+}
+
+function googleShareMetadataOverride(place, metadata, url) {
+  if (!isGoogleShareUrl(safeUrl(url))) return metadata;
+  if (!place?.isRelevantPlace || !place?.name) return metadata;
+  const description = [place.address, place.city].filter(Boolean).join(", ") || metadata.description;
+  return { title: place.name, description, imageUrl: metadata.imageUrl };
 }
 
 export function normalizeExternalUrl(input) {
