@@ -686,15 +686,15 @@ function renderSharePage(metadata, redirectUrl, options = {}) {
       font-size: 1rem;
       line-height: 1.5;
     }
-    a {
-      display: inline-block;
-      padding: 12px 18px;
-      border-radius: 999px;
-      background: #1e1a16;
-      color: #fffaf1;
-      text-decoration: none;
-      font-size: 0.95rem;
-      letter-spacing: 0.02em;
+    .redirect-notice {
+      margin: 0;
+      font-size: 0.85rem;
+      color: rgba(30, 26, 22, 0.5);
+    }
+    .redirect-notice a {
+      color: rgba(30, 26, 22, 0.6);
+      text-decoration: underline;
+      text-underline-offset: 2px;
     }
   </style>
   <script>
@@ -709,7 +709,7 @@ function renderSharePage(metadata, redirectUrl, options = {}) {
   <main>
     <h1>${escapeHtml(title)}</h1>
     <p>${escapeHtml(description)}</p>
-    <a href="${escapeHtml(redirectUrl)}">${escapeHtml(buttonLabel)}</a>
+    <p class="redirect-notice">Redirecting to <a href="${escapeHtml(redirectUrl)}">${escapeHtml(redirectUrl)}</a>&hellip; <a href="${escapeHtml(redirectUrl)}">click here if not redirected</a></p>
   </main>
 </body>
 </html>`;
