@@ -2585,8 +2585,47 @@ function renderEntry() {
       : ""
   ].filter(Boolean).join("");
 
+  const timelineEntries = visibleTripEntries(entry.tripId);
+  const timelineIdx = timelineEntries.findIndex(e => e.id === entry.id);
+  const timelineMinTs = timelineEntries.length > 1 ? new Date(timelineEntries[0].timestamp).getTime() : 0;
+  const timelineMaxTs = timelineEntries.length > 1 ? new Date(timelineEntries[timelineEntries.length - 1].timestamp).getTime() : 1;
+  const timelineSpan = timelineMaxTs - timelineMinTs || 1;
+  // Compute horizontal positions, then assign vertical rows to reduce overlap.
+  // Rows: 0=center, 1=below, -1=above, 2=further below, -2=further above (10px each).
+  const TIMELINE_OVERLAP_PCT = 3.5;
+  const timelineRowPrefs = [0, 1, -1, 2, -2];
+  const timelineLastOnRow = {};
+  const timelineDots = timelineEntries.map((e, i) => {
+    const pct = timelineEntries.length < 2 ? 50
+      : timelineSpan > 0 ? (new Date(e.timestamp).getTime() - timelineMinTs) / timelineSpan * 100
+      : i / (timelineEntries.length - 1) * 100;
+    let row = 0;
+    for (const r of timelineRowPrefs) {
+      if (timelineLastOnRow[r] === undefined || pct - timelineLastOnRow[r] >= TIMELINE_OVERLAP_PCT) {
+        row = r;
+        timelineLastOnRow[r] = pct;
+        break;
+      }
+    }
+    const topStyle = row === 0 ? "" : `;top:calc(50% + ${row * 10}px)`;
+    let stem = "";
+    if (row !== 0) {
+      const stemHeight = Math.abs(row) * 10 - 4;
+      const stemTop = row > 0 ? "50%" : `calc(50% - ${stemHeight}px)`;
+      stem = `<span class="entry-timeline-stem" style="left:${pct}%;top:${stemTop};height:${stemHeight}px"></span>`;
+    }
+    return stem + `<button class="entry-timeline-dot${e.id === entry.id ? " current" : ""}" data-action="entry-nav" data-entry-id="${esc(e.id)}" aria-label="${esc(entryMetaLine(e, { includeDate: true }))}" style="left:${pct}%${topStyle}"></button>`;
+  }).join("");
+
   $("entry-body").innerHTML = `
     ${hasGeotag(entry) ? '<div class="map-panel compact"><div class="map-canvas" id="entry-map"></div></div>' : ""}
+    <div class="entry-timeline">
+      <button class="entry-timeline-nav" data-action="entry-prev" aria-label="Previous entry"${timelineIdx <= 0 ? " disabled" : ""}><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="m12 8-4 4 4 4"/><path d="M16 12H8"/></svg></button>
+      <span class="entry-timeline-connector" aria-hidden="true"></span>
+      <div class="entry-timeline-track">${timelineDots}</div>
+      <span class="entry-timeline-connector" aria-hidden="true"></span>
+      <button class="entry-timeline-nav" data-action="entry-next" aria-label="Next entry"${timelineIdx >= timelineEntries.length - 1 ? " disabled" : ""}><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="m12 16 4-4-4-4"/><path d="M8 12h8"/></svg></button>
+    </div>
     <div class="overlay-topbar">
       <button class="back-btn" data-action="entry-back" type="button">BACK</button>
       ${actions ? `<div class="entry-head-actions">${actions}</div>` : ""}
@@ -4038,6 +4077,23 @@ function bindEvents() {
       return;
     }
     if (action.dataset.action === "entry-back") return closeEntry();
+    if (action.dataset.action === "entry-nav") {
+      const targetId = action.dataset.entryId;
+      if (targetId && targetId !== state.currentEntryId) openEntry(targetId);
+      return;
+    }
+    if (action.dataset.action === "entry-prev") {
+      const prevEntries = visibleTripEntries(getEntry(state.currentEntryId)?.tripId);
+      const prevIdx = prevEntries.findIndex(e => e.id === state.currentEntryId);
+      if (prevIdx > 0) openEntry(prevEntries[prevIdx - 1].id);
+      return;
+    }
+    if (action.dataset.action === "entry-next") {
+      const nextEntries = visibleTripEntries(getEntry(state.currentEntryId)?.tripId);
+      const nextIdx = nextEntries.findIndex(e => e.id === state.currentEntryId);
+      if (nextIdx !== -1 && nextIdx < nextEntries.length - 1) openEntry(nextEntries[nextIdx + 1].id);
+      return;
+    }
     if (action.dataset.action === "share-entry") return runAction(() => openShareScreen({ entryId: state.currentEntryId }));
     if (action.dataset.action === "edit-entry") {
       const entry = getEntry(state.currentEntryId);
