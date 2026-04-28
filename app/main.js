@@ -2341,8 +2341,8 @@ function renderTrip() {
   const tripActions = [
     renderTripActivityButton(trip),
     readOnly ? "" : '<button class="action-link title-action" data-action="compose-journal" type="button">+ ADD</button>',
-    !readOnly && owner ? '<button class="action-link title-action" data-action="share-trip" type="button">SHARE</button>' : "",
-    !readOnly && owner ? '<button class="action-link title-action" data-action="edit-trip" type="button">EDIT</button>' : ""
+    !readOnly ? '<button class="action-link title-action" data-action="share-trip" type="button">SHARE</button>' : "",
+    !readOnly ? '<button class="action-link title-action" data-action="edit-trip" type="button">EDIT</button>' : ""
   ].filter(Boolean).join("");
 
   $("trip-body").innerHTML = `
@@ -2574,7 +2574,7 @@ function renderEntry() {
   const includeAuthor = showEntryAuthors(entry.tripId);
   const readOnly = isReadOnlyTrip(trip);
   const actions = [
-    isTripOwner(trip) && isEntryDirectShareable(entry)
+    !readOnly && isEntryDirectShareable(entry)
       ? '<button class="action-link" data-action="share-entry" type="button">SHARE</button>'
       : "",
     !readOnly && canManageEntry(entry)
@@ -3569,7 +3569,6 @@ function openTripForm() {
   const trip = getTrip(state.currentTripId);
   if (!trip) return;
   assertTripWritable(trip);
-  if (!isTripOwner(trip)) throw new Error("Only the trip owner can edit trip details.");
   state.editingTripId = trip.id;
   renderTripForm();
   openOverlay("trip-form-overlay");
@@ -3585,10 +3584,10 @@ function closeTripForm() {
 function renderTripForm() {
   const trip = getTrip(state.editingTripId);
   if (!trip) return;
-  const actions = `
-    <button class="action-link" data-action="save-trip" type="button">SAVE</button>
-    <button class="action-link destructive" data-action="delete-trip" type="button">DELETE</button>
-  `;
+  const actions = [
+    '<button class="action-link" data-action="save-trip" type="button">SAVE</button>',
+    isTripOwner(trip) ? '<button class="action-link destructive" data-action="delete-trip" type="button">DELETE</button>' : ""
+  ].filter(Boolean).join("");
 
   $("trip-form-body").innerHTML = `
     <div class="overlay-topbar">
@@ -3619,7 +3618,6 @@ function saveTripFromForm() {
   const trip = getTrip(state.editingTripId);
   if (!trip) return;
   assertTripWritable(trip);
-  if (!isTripOwner(trip)) throw new Error("Only the trip owner can edit trip details.");
 
   const title = $("trip-title-input")?.value.trim() || "";
   if (!title) {
