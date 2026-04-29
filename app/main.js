@@ -1398,7 +1398,8 @@ function entryComments(entryId) {
 function formatActivityTime(iso) {
   const date = new Date(iso || "");
   if (Number.isNaN(date.getTime())) return "";
-  return `${formatDate(date.toISOString().slice(0, 10))} | ${formatTime(date.toISOString())}`;
+  const localDate = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+  return `${formatDate(localDate)} | ${formatTime(iso)}`;
 }
 
 function activityItems(tripId = "") {
