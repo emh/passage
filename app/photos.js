@@ -134,7 +134,6 @@ export async function processVideoFile(file, onProgress) {
   let audioCtx = null;
   try {
     audioCtx = new AudioContext();
-    if (audioCtx.state === "suspended") await audioCtx.resume();
     const source = audioCtx.createMediaElementSource(video);
     const streamDest = audioCtx.createMediaStreamDestination();
     source.connect(streamDest);
@@ -162,10 +161,12 @@ export async function processVideoFile(file, onProgress) {
   recorder.start(100);
 
   const drawLoop = () => {
-    if (video.ended || video.paused) return;
-    ctx.drawImage(video, 0, 0, width, height);
-    if (Number.isFinite(video.duration) && video.duration > 0) {
-      onProgress?.(video.currentTime / video.duration);
+    if (video.ended) return;
+    if (!video.paused) {
+      ctx.drawImage(video, 0, 0, width, height);
+      if (Number.isFinite(video.duration) && video.duration > 0) {
+        onProgress?.(video.currentTime / video.duration);
+      }
     }
     requestAnimationFrame(drawLoop);
   };
