@@ -91,10 +91,12 @@ export async function processVideoFile(file, onProgress) {
     throw new Error("choose a video file");
   }
 
-  const srcUrl = URL.createObjectURL(file);
+  const [srcUrl, gps] = await Promise.all([
+    Promise.resolve(URL.createObjectURL(file)),
+    readVideoGps(file)
+  ]);
   const video = document.createElement("video");
   video.src = srcUrl;
-  video.muted = true;
   video.playsInline = true;
 
   await new Promise((resolve, reject) => {
@@ -129,13 +131,19 @@ export async function processVideoFile(file, onProgress) {
 
   const canvasStream = canvas.captureStream(VIDEO_FPS);
 
+  let audioCtx = null;
   try {
-    const sourceStream = video.captureStream();
-    for (const track of sourceStream.getAudioTracks()) {
+    audioCtx = new AudioContext();
+    if (audioCtx.state === "suspended") await audioCtx.resume();
+    const source = audioCtx.createMediaElementSource(video);
+    const streamDest = audioCtx.createMediaStreamDestination();
+    source.connect(streamDest);
+    for (const track of streamDest.stream.getAudioTracks()) {
       canvasStream.addTrack(track);
     }
   } catch (_) {
-    // audio capture not supported (Safari) — proceed without audio
+    // Web Audio not supported or no audio track — mute to avoid speaker output
+    video.muted = true;
   }
 
   const mimeTypes = [
@@ -175,6 +183,7 @@ export async function processVideoFile(file, onProgress) {
   });
 
   URL.revokeObjectURL(srcUrl);
+  audioCtx?.close();
 
   const assetId = createId("video");
   await putPhotoAsset(assetId, blob);
@@ -191,8 +200,40 @@ export async function processVideoFile(file, onProgress) {
       photoSize: blob.size || 0,
       photoUploadedAt: ""
     },
-    exif: {}
+    exif: { lat: gps.lat, lng: gps.lng }
   };
+}
+
+async function readVideoGps(file) {
+  try {
+    const chunkSize = 512 * 1024;
+    const slices = [file.slice(0, chunkSize)];
+    if (file.size > chunkSize) {
+      slices.push(file.slice(Math.max(chunkSize, file.size - chunkSize)));
+    }
+    for (const slice of slices) {
+      const bytes = new Uint8Array(await slice.arrayBuffer());
+      for (let i = 0; i < bytes.length - 12; i++) {
+        // ©xyz atom: 0xA9 'x' 'y' 'z'
+        if (bytes[i] === 0xA9 && bytes[i+1] === 0x78 && bytes[i+2] === 0x79 && bytes[i+3] === 0x7A) {
+          const strLen = (bytes[i+4] << 8) | bytes[i+5];
+          if (strLen < 4 || i + 8 + strLen > bytes.length) continue;
+          let text = "";
+          for (let j = 0; j < strLen; j++) text += String.fromCharCode(bytes[i + 8 + j]);
+          // ISO 6709: +37.1234-122.5678/ or similar
+          const match = text.match(/^([+-]\d+(?:\.\d+)?)([+-]\d+(?:\.\d+)?)/);
+          if (match) {
+            const lat = parseFloat(match[1]);
+            const lng = parseFloat(match[2]);
+            if (Number.isFinite(lat) && Number.isFinite(lng)) return { lat, lng };
+          }
+        }
+      }
+    }
+  } catch {
+    // ignore
+  }
+  return { lat: null, lng: null };
 }
 
 function openPhotoDb() {
