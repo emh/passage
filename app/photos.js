@@ -91,18 +91,28 @@ export async function processVideoFile(file, onProgress) {
     throw new Error("choose a video file");
   }
 
-  const [srcUrl, gps] = await Promise.all([
-    Promise.resolve(URL.createObjectURL(file)),
-    readVideoGps(file)
-  ]);
+  const srcUrl = URL.createObjectURL(file);
   const video = document.createElement("video");
   video.src = srcUrl;
   video.playsInline = true;
 
+  // play() is called synchronously before any await — still inside the
+  // file-input change event's user gesture context. iOS requires a gesture
+  // for unmuted playback, but once granted the element stays unlocked for
+  // future plays even after the gesture context expires.
+  const unlock = video.play()
+    .then(() => { video.pause(); video.currentTime = 0; })
+    .catch(() => { video.muted = true; });
+
+  const gps = await readVideoGps(file);
+
   await new Promise((resolve, reject) => {
+    if (video.readyState >= 1) { resolve(); return; }
     video.onloadedmetadata = resolve;
-    video.onerror = () => reject(new Error("video could not be read"));
+    video.onerror = () => { URL.revokeObjectURL(srcUrl); reject(new Error("video could not be read")); };
   });
+
+  await unlock;
 
   if (Number.isFinite(video.duration) && video.duration > MAX_VIDEO_DURATION_S) {
     URL.revokeObjectURL(srcUrl);
@@ -111,11 +121,51 @@ export async function processVideoFile(file, onProgress) {
 
   const sourceWidth = video.videoWidth;
   const sourceHeight = video.videoHeight;
-  if (!sourceWidth || !sourceHeight) {
-    URL.revokeObjectURL(srcUrl);
-    throw new Error("video dimensions could not be read");
+
+  let blob = null;
+  let width = sourceWidth || 0;
+  let height = sourceHeight || 0;
+
+  if (sourceWidth && sourceHeight) {
+    try {
+      ({ blob, width, height } = await transcodeVideo(video, onProgress));
+    } catch (_) {
+      // canvas+MediaRecorder not supported — fall through to raw
+    }
   }
 
+  URL.revokeObjectURL(srcUrl);
+
+  if (!blob) {
+    const MAX_RAW_BYTES = 50 * 1024 * 1024;
+    if (file.size > MAX_RAW_BYTES) {
+      throw new Error(`video could not be compressed and is too large (${Math.round(file.size / 1024 / 1024)} MB). Try a shorter clip.`);
+    }
+    blob = file;
+  }
+
+  const assetId = createId("video");
+  await putPhotoAsset(assetId, blob);
+  objectUrls.set(assetId, URL.createObjectURL(blob));
+
+  return {
+    assetId,
+    blob,
+    metadata: {
+      photoAssetId: assetId,
+      photoMime: blob.type || "video/mp4",
+      photoWidth: width,
+      photoHeight: height,
+      photoSize: blob.size || 0,
+      photoUploadedAt: ""
+    },
+    exif: { lat: gps.lat, lng: gps.lng }
+  };
+}
+
+async function transcodeVideo(video, onProgress) {
+  const sourceWidth = video.videoWidth;
+  const sourceHeight = video.videoHeight;
   const scale = Math.min(1, MAX_VIDEO_EDGE / Math.max(sourceWidth, sourceHeight));
   const width = Math.max(2, Math.round(sourceWidth * scale / 2) * 2);
   const height = Math.max(2, Math.round(sourceHeight * scale / 2) * 2);
@@ -124,31 +174,30 @@ export async function processVideoFile(file, onProgress) {
   canvas.width = width;
   canvas.height = height;
   const ctx = canvas.getContext("2d", { alpha: false });
-  if (!ctx) {
-    URL.revokeObjectURL(srcUrl);
-    throw new Error("video could not be processed");
-  }
+  if (!ctx) throw new Error("canvas context unavailable");
 
   const canvasStream = canvas.captureStream(VIDEO_FPS);
 
+  // The element was already unlocked with a user gesture in processVideoFile.
+  // Route its audio through Web Audio so it goes to the stream, not speakers.
   let audioCtx = null;
   try {
     audioCtx = new AudioContext();
+    if (audioCtx.state === "suspended") await audioCtx.resume();
     const source = audioCtx.createMediaElementSource(video);
-    const streamDest = audioCtx.createMediaStreamDestination();
-    source.connect(streamDest);
-    for (const track of streamDest.stream.getAudioTracks()) {
-      canvasStream.addTrack(track);
-    }
+    const dest = audioCtx.createMediaStreamDestination();
+    source.connect(dest);
+    for (const track of dest.stream.getAudioTracks()) canvasStream.addTrack(track);
   } catch (_) {
-    // Web Audio not supported or no audio track — mute to avoid speaker output
-    video.muted = true;
+    audioCtx?.close();
+    audioCtx = null;
   }
 
   const mimeTypes = [
     "video/webm;codecs=vp9,opus",
     "video/webm;codecs=vp8,opus",
     "video/webm",
+    "video/mp4;codecs=avc1",
     "video/mp4"
   ];
   const mimeType = mimeTypes.find(m => MediaRecorder.isTypeSupported(m)) || "";
@@ -156,7 +205,15 @@ export async function processVideoFile(file, onProgress) {
   if (mimeType) recorderOptions.mimeType = mimeType;
 
   const chunks = [];
-  const recorder = new MediaRecorder(canvasStream, recorderOptions);
+  let recorder;
+  try {
+    recorder = new MediaRecorder(canvasStream, recorderOptions);
+  } catch (_) {
+    // Audio codec rejected — strip audio and retry video-only
+    for (const track of canvasStream.getAudioTracks()) canvasStream.removeTrack(track);
+    recorder = new MediaRecorder(canvasStream, recorderOptions);
+  }
+
   recorder.ondataavailable = e => { if (e.data?.size > 0) chunks.push(e.data); };
   recorder.start(100);
 
@@ -178,31 +235,13 @@ export async function processVideoFile(file, onProgress) {
   });
 
   recorder.stop();
-
-  const blob = await new Promise(resolve => {
-    recorder.onstop = () => resolve(new Blob(chunks, { type: mimeType || "video/webm" }));
-  });
-
-  URL.revokeObjectURL(srcUrl);
   audioCtx?.close();
 
-  const assetId = createId("video");
-  await putPhotoAsset(assetId, blob);
-  objectUrls.set(assetId, URL.createObjectURL(blob));
+  const blob = await new Promise(resolve => {
+    recorder.onstop = () => resolve(new Blob(chunks, { type: mimeType || "video/mp4" }));
+  });
 
-  return {
-    assetId,
-    blob,
-    metadata: {
-      photoAssetId: assetId,
-      photoMime: blob.type || mimeType || "video/webm",
-      photoWidth: width,
-      photoHeight: height,
-      photoSize: blob.size || 0,
-      photoUploadedAt: ""
-    },
-    exif: { lat: gps.lat, lng: gps.lng }
-  };
+  return { blob, width, height };
 }
 
 async function readVideoGps(file) {
