@@ -98,11 +98,10 @@ export async function processVideoFile(file, onProgress) {
 
   // play() is called synchronously before any await — still inside the
   // file-input change event's user gesture context. iOS requires a gesture
-  // for unmuted playback, but once granted the element stays unlocked for
-  // future plays even after the gesture context expires.
-  const unlock = video.play()
-    .then(() => { video.pause(); video.currentTime = 0; })
-    .catch(() => { video.muted = true; });
+  // for unmuted playback; once granted, the element stays unlocked for
+  // future plays even after the gesture context expires. AbortError is
+  // expected because we pause immediately once metadata arrives.
+  video.play().catch(e => { if (e.name !== "AbortError") video.muted = true; });
 
   const gps = await readVideoGps(file);
 
@@ -112,7 +111,10 @@ export async function processVideoFile(file, onProgress) {
     video.onerror = () => { URL.revokeObjectURL(srcUrl); reject(new Error("video could not be read")); };
   });
 
-  await unlock;
+  // Pause and rewind regardless of whether the early play has resolved yet.
+  // This may abort the early play (hence the AbortError catch above).
+  video.pause();
+  video.currentTime = 0;
 
   if (Number.isFinite(video.duration) && video.duration > MAX_VIDEO_DURATION_S) {
     URL.revokeObjectURL(srcUrl);
@@ -183,7 +185,11 @@ async function transcodeVideo(video, onProgress) {
   let audioCtx = null;
   try {
     audioCtx = new AudioContext();
-    if (audioCtx.state === "suspended") await audioCtx.resume();
+    // Give resume() up to 300ms; if audio was unlocked by the early play()
+    // in processVideoFile it resolves instantly. Don't block transcoding on it.
+    if (audioCtx.state === "suspended") {
+      await Promise.race([audioCtx.resume(), new Promise(r => setTimeout(r, 300))]);
+    }
     const source = audioCtx.createMediaElementSource(video);
     const dest = audioCtx.createMediaStreamDestination();
     source.connect(dest);
