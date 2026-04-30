@@ -103,7 +103,7 @@ export async function processVideoFile(file, onProgress) {
   // expected because we pause immediately once metadata arrives.
   video.play().catch(e => { if (e.name !== "AbortError") video.muted = true; });
 
-  const gps = await readVideoGps(file);
+  const gps = await readVideoMetadata(file);
 
   await new Promise((resolve, reject) => {
     if (video.readyState >= 1) { resolve(); return; }
@@ -161,7 +161,7 @@ export async function processVideoFile(file, onProgress) {
       photoSize: blob.size || 0,
       photoUploadedAt: ""
     },
-    exif: { lat: gps.lat, lng: gps.lng }
+    exif: { lat: gps.lat, lng: gps.lng, capturedAt: gps.capturedAt }
   };
 }
 
@@ -250,7 +250,8 @@ async function transcodeVideo(video, onProgress) {
   return { blob, width, height };
 }
 
-async function readVideoGps(file) {
+async function readVideoMetadata(file) {
+  const result = { lat: null, lng: null, capturedAt: "" };
   try {
     const chunkSize = 512 * 1024;
     const slices = [file.slice(0, chunkSize)];
@@ -258,25 +259,56 @@ async function readVideoGps(file) {
       slices.push(file.slice(Math.max(chunkSize, file.size - chunkSize)));
     }
     for (const slice of slices) {
-      // Decode as latin-1 so every byte maps to a character — lets us regex-search
-      // binary container data for the embedded ISO 6709 location string without
-      // needing to parse the MP4 box structure.
-      const text = new TextDecoder("latin1").decode(await slice.arrayBuffer());
-      // ISO 6709: ±lat±lon[±alt]/ e.g. +37.785834-122.406417+000.000/
-      const match = text.match(/([+-]\d{1,3}\.\d{3,10})([+-]\d{1,3}\.\d{3,10})[^/]*\//);
-      if (match) {
-        const lat = parseFloat(match[1]);
-        const lng = parseFloat(match[2]);
-        if (Number.isFinite(lat) && Number.isFinite(lng) &&
-            Math.abs(lat) <= 90 && Math.abs(lng) <= 180) {
-          return { lat, lng };
+      const buf = await slice.arrayBuffer();
+      const bytes = new Uint8Array(buf);
+      const view = new DataView(buf);
+
+      // GPS: scan for ISO 6709 location string (©xyz atom content)
+      if (result.lat === null) {
+        const text = new TextDecoder("latin1").decode(buf);
+        const gpsMatch = text.match(/([+-]\d{1,3}\.\d{3,10})([+-]\d{1,3}\.\d{3,10})[^/]*\//);
+        if (gpsMatch) {
+          const lat = parseFloat(gpsMatch[1]);
+          const lng = parseFloat(gpsMatch[2]);
+          if (Number.isFinite(lat) && Number.isFinite(lng) &&
+              Math.abs(lat) <= 90 && Math.abs(lng) <= 180) {
+            result.lat = lat;
+            result.lng = lng;
+          }
         }
       }
+
+      // Timestamp: mvhd atom stores creation time as seconds since 1904-01-01
+      if (!result.capturedAt) {
+        for (let i = 0; i < bytes.length - 16; i++) {
+          if (bytes[i] === 0x6D && bytes[i+1] === 0x76 && bytes[i+2] === 0x68 && bytes[i+3] === 0x64) {
+            const version = bytes[i + 4];
+            let macSecs = 0;
+            if (version === 0) {
+              macSecs = view.getUint32(i + 8, false);
+            } else if (version === 1) {
+              const hi = view.getUint32(i + 8, false);
+              const lo = view.getUint32(i + 12, false);
+              macSecs = hi * 0x100000000 + lo;
+            }
+            if (macSecs > 0) {
+              // Mac epoch is 2082844800 seconds before Unix epoch
+              const date = new Date((macSecs - 2082844800) * 1000);
+              if (!Number.isNaN(date.getTime()) && date.getFullYear() >= 1990) {
+                result.capturedAt = date.toISOString();
+                break;
+              }
+            }
+          }
+        }
+      }
+
+      if (result.lat !== null && result.capturedAt) break;
     }
   } catch {
     // ignore
   }
-  return { lat: null, lng: null };
+  return result;
 }
 
 function openPhotoDb() {
