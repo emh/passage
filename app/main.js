@@ -3438,10 +3438,16 @@ async function selectEntryPhotos(files) {
   for (const file of videoFiles) {
     state.entryPhotoError = "compressing video...";
     renderCompose();
-    processed.push(await processVideoFile(file, pct => {
-      state.entryPhotoError = `compressing video... ${Math.round(pct * 100)}%`;
+    try {
+      processed.push(await processVideoFile(file, pct => {
+        state.entryPhotoError = `compressing video... ${Math.round(pct * 100)}%`;
+        renderCompose();
+      }));
+    } catch (error) {
+      state.entryPhotoError = "";
       renderCompose();
-    }));
+      throw error;
+    }
   }
 
   state.entryPhotoDrafts = [

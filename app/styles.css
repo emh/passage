@@ -1183,6 +1183,7 @@ video.photo-preview {
   z-index: 9999;
   bottom: calc(28px + env(safe-area-inset-bottom, 0));
   left: 50%;
+  max-width: min(480px, calc(100vw - 40px));
   padding: 8px 20px;
   border: 1px solid var(--rule);
   opacity: 0;
@@ -1192,9 +1193,11 @@ video.photo-preview {
   font-family: var(--mono);
   font-size: 11px;
   letter-spacing: 0;
+  text-align: center;
   transform: translateX(-50%) translateY(20px);
   transition: opacity 0.3s, transform 0.3s var(--ease);
-  white-space: nowrap;
+  white-space: normal;
+  word-break: break-word;
 }
 
 .toast.visible {
