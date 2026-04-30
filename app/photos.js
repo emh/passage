@@ -258,21 +258,18 @@ async function readVideoGps(file) {
       slices.push(file.slice(Math.max(chunkSize, file.size - chunkSize)));
     }
     for (const slice of slices) {
-      const bytes = new Uint8Array(await slice.arrayBuffer());
-      for (let i = 0; i < bytes.length - 12; i++) {
-        // ©xyz atom: 0xA9 'x' 'y' 'z'
-        if (bytes[i] === 0xA9 && bytes[i+1] === 0x78 && bytes[i+2] === 0x79 && bytes[i+3] === 0x7A) {
-          const strLen = (bytes[i+4] << 8) | bytes[i+5];
-          if (strLen < 4 || i + 8 + strLen > bytes.length) continue;
-          let text = "";
-          for (let j = 0; j < strLen; j++) text += String.fromCharCode(bytes[i + 8 + j]);
-          // ISO 6709: +37.1234-122.5678/ or similar
-          const match = text.match(/^([+-]\d+(?:\.\d+)?)([+-]\d+(?:\.\d+)?)/);
-          if (match) {
-            const lat = parseFloat(match[1]);
-            const lng = parseFloat(match[2]);
-            if (Number.isFinite(lat) && Number.isFinite(lng)) return { lat, lng };
-          }
+      // Decode as latin-1 so every byte maps to a character — lets us regex-search
+      // binary container data for the embedded ISO 6709 location string without
+      // needing to parse the MP4 box structure.
+      const text = new TextDecoder("latin1").decode(await slice.arrayBuffer());
+      // ISO 6709: ±lat±lon[±alt]/ e.g. +37.785834-122.406417+000.000/
+      const match = text.match(/([+-]\d{1,3}\.\d{3,10})([+-]\d{1,3}\.\d{3,10})[^/]*\//);
+      if (match) {
+        const lat = parseFloat(match[1]);
+        const lng = parseFloat(match[2]);
+        if (Number.isFinite(lat) && Number.isFinite(lng) &&
+            Math.abs(lat) <= 90 && Math.abs(lng) <= 180) {
+          return { lat, lng };
         }
       }
     }
