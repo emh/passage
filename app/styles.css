@@ -742,6 +742,11 @@ h1 {
   object-fit: contain;
 }
 
+.entry-photo-frame video.entry-photo {
+  display: block;
+  max-width: 100%;
+}
+
 .entry-photo-placeholder {
   display: flex;
   width: 100%;
@@ -1067,6 +1072,10 @@ h1 {
   margin-bottom: 8px;
   object-fit: contain;
   background: var(--hover);
+}
+
+video.photo-preview {
+  height: auto;
 }
 
 .photo-edit-grid {

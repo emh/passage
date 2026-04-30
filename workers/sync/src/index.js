@@ -19,7 +19,7 @@ import {
 const CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 const CODE_LENGTH = 8;
 const INTERNAL_CREATE_HEADER = "X-Passage-Internal-Create";
-const MAX_PHOTO_BYTES = 4 * 1024 * 1024;
+const MAX_ASSET_BYTES = 50 * 1024 * 1024;
 const MAX_URL_METADATA_HTML_BYTES = 512 * 1024;
 const DEFAULT_OPENAI_MODEL = "gpt-5";
 const DEFAULT_NOMINATIM_ENDPOINT = "https://nominatim.openstreetmap.org";
@@ -734,10 +734,11 @@ async function handleAssetRequest(request, env, cors, route) {
 
   if (request.method === "PUT" || request.method === "POST") {
     const contentType = request.headers.get("Content-Type") || "application/octet-stream";
-    if (!contentType.startsWith("image/")) return json({ error: "Expected an image" }, 415, cors);
+    const isValidMedia = contentType.startsWith("image/") || contentType.startsWith("video/");
+    if (!isValidMedia) return json({ error: "Expected an image or video" }, 415, cors);
 
     const bytes = await request.arrayBuffer();
-    if (bytes.byteLength > MAX_PHOTO_BYTES) return json({ error: "Photo is too large" }, 413, cors);
+    if (bytes.byteLength > MAX_ASSET_BYTES) return json({ error: "Asset is too large" }, 413, cors);
 
     const uploadedAt = new Date().toISOString();
     await env.PASSAGE_PHOTOS.put(key, bytes, {

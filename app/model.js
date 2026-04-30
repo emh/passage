@@ -745,7 +745,8 @@ function normalizeAbsoluteHttpUrl(value) {
 
 function normalizePhotoMime(value) {
   const text = cleanSingleLine(value).toLowerCase();
-  return text.startsWith("image/") ? text : "";
+  if (text.startsWith("image/") || text.startsWith("video/")) return text;
+  return "";
 }
 
 function coerceTripField(field, value) {

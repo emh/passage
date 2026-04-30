@@ -6,6 +6,11 @@ const STORE_NAME = "assets";
 const MAX_PHOTO_EDGE = 1600;
 const PHOTO_QUALITY = 0.78;
 const PHOTO_MIME = "image/jpeg";
+const MAX_VIDEO_EDGE = 1280;
+const VIDEO_BITRATE = 1_500_000;
+const AUDIO_BITRATE = 128_000;
+const VIDEO_FPS = 30;
+const MAX_VIDEO_DURATION_S = 180;
 
 const objectUrls = new Map();
 let dbPromise = null;
@@ -78,6 +83,117 @@ export async function processPhotoFile(file) {
       photoUploadedAt: ""
     },
     exif
+  };
+}
+
+export async function processVideoFile(file, onProgress) {
+  if (!(file instanceof File) || !file.type.startsWith("video/")) {
+    throw new Error("choose a video file");
+  }
+
+  const srcUrl = URL.createObjectURL(file);
+  const video = document.createElement("video");
+  video.src = srcUrl;
+  video.muted = true;
+  video.playsInline = true;
+
+  await new Promise((resolve, reject) => {
+    video.onloadedmetadata = resolve;
+    video.onerror = () => reject(new Error("video could not be read"));
+  });
+
+  if (Number.isFinite(video.duration) && video.duration > MAX_VIDEO_DURATION_S) {
+    URL.revokeObjectURL(srcUrl);
+    throw new Error("video is too long (max 3 minutes)");
+  }
+
+  const sourceWidth = video.videoWidth;
+  const sourceHeight = video.videoHeight;
+  if (!sourceWidth || !sourceHeight) {
+    URL.revokeObjectURL(srcUrl);
+    throw new Error("video dimensions could not be read");
+  }
+
+  const scale = Math.min(1, MAX_VIDEO_EDGE / Math.max(sourceWidth, sourceHeight));
+  const width = Math.max(2, Math.round(sourceWidth * scale / 2) * 2);
+  const height = Math.max(2, Math.round(sourceHeight * scale / 2) * 2);
+
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext("2d", { alpha: false });
+  if (!ctx) {
+    URL.revokeObjectURL(srcUrl);
+    throw new Error("video could not be processed");
+  }
+
+  const canvasStream = canvas.captureStream(VIDEO_FPS);
+
+  try {
+    const sourceStream = video.captureStream();
+    for (const track of sourceStream.getAudioTracks()) {
+      canvasStream.addTrack(track);
+    }
+  } catch (_) {
+    // audio capture not supported (Safari) — proceed without audio
+  }
+
+  const mimeTypes = [
+    "video/webm;codecs=vp9,opus",
+    "video/webm;codecs=vp8,opus",
+    "video/webm",
+    "video/mp4"
+  ];
+  const mimeType = mimeTypes.find(m => MediaRecorder.isTypeSupported(m)) || "";
+  const recorderOptions = { videoBitsPerSecond: VIDEO_BITRATE, audioBitsPerSecond: AUDIO_BITRATE };
+  if (mimeType) recorderOptions.mimeType = mimeType;
+
+  const chunks = [];
+  const recorder = new MediaRecorder(canvasStream, recorderOptions);
+  recorder.ondataavailable = e => { if (e.data?.size > 0) chunks.push(e.data); };
+  recorder.start(100);
+
+  video.playbackRate = 4;
+
+  const drawLoop = () => {
+    if (video.ended || video.paused) return;
+    ctx.drawImage(video, 0, 0, width, height);
+    if (Number.isFinite(video.duration) && video.duration > 0) {
+      onProgress?.(video.currentTime / video.duration);
+    }
+    requestAnimationFrame(drawLoop);
+  };
+
+  await new Promise((resolve, reject) => {
+    video.onended = resolve;
+    video.onerror = () => reject(new Error("video processing failed"));
+    video.play().then(() => requestAnimationFrame(drawLoop)).catch(reject);
+  });
+
+  recorder.stop();
+
+  const blob = await new Promise(resolve => {
+    recorder.onstop = () => resolve(new Blob(chunks, { type: mimeType || "video/webm" }));
+  });
+
+  URL.revokeObjectURL(srcUrl);
+
+  const assetId = createId("video");
+  await putPhotoAsset(assetId, blob);
+  objectUrls.set(assetId, URL.createObjectURL(blob));
+
+  return {
+    assetId,
+    blob,
+    metadata: {
+      photoAssetId: assetId,
+      photoMime: blob.type || mimeType || "video/webm",
+      photoWidth: width,
+      photoHeight: height,
+      photoSize: blob.size || 0,
+      photoUploadedAt: ""
+    },
+    exif: {}
   };
 }
 

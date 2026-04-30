@@ -34,7 +34,7 @@ import {
   visibleTrips
 } from "./model.js";
 import { ensureSharedTripSyncState, loadAppState, loadSettings, saveAppState } from "./storage.js";
-import { ensurePhotoObjectUrl, getCachedPhotoUrl, getPhotoAsset, hasPhotoAsset, processPhotoFile, putPhotoAsset } from "./photos.js";
+import { ensurePhotoObjectUrl, getCachedPhotoUrl, getPhotoAsset, hasPhotoAsset, processPhotoFile, processVideoFile, putPhotoAsset } from "./photos.js";
 import { createRemoteProfile, createRemoteTrip, fetchPhotoAsset, fetchRemoteProfile, fetchRemoteTrip, inspectEntryUrl, PassageSync, updateRemoteProfile, uploadPhotoAsset } from "./sync.js";
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -916,19 +916,20 @@ function clearConfirmation(view = "") {
 function photoStatus(photo) {
   const assetId = photo?.photoAssetId || "";
   if (!assetId) return { label: "", tone: "" };
+  const kind = (photo?.photoMime || "").startsWith("video/") ? "video" : "photo";
 
   const transfer = photoTransferStatus.get(assetId);
-  if (transfer?.status === "upload-failed") return { label: "photo upload failed - retrying", tone: "error" };
-  if (transfer?.status === "download-failed") return { label: "photo download failed - retrying", tone: "error" };
-  if (photoUploads.has(assetId)) return { label: "uploading photo...", tone: "pending" };
-  if (photoDownloads.has(assetId)) return { label: "downloading photo...", tone: "pending" };
+  if (transfer?.status === "upload-failed") return { label: `${kind} upload failed - retrying`, tone: "error" };
+  if (transfer?.status === "download-failed") return { label: `${kind} download failed - retrying`, tone: "error" };
+  if (photoUploads.has(assetId)) return { label: `uploading ${kind}...`, tone: "pending" };
+  if (photoDownloads.has(assetId)) return { label: `downloading ${kind}...`, tone: "pending" };
 
   const cached = Boolean(getCachedPhotoUrl(assetId));
-  if (!photo.photoUploadedAt && cached && state.settings.syncBaseUrl) return { label: "photo pending upload", tone: "pending" };
-  if (!photo.photoUploadedAt && cached) return { label: "photo saved locally", tone: "local" };
-  if (photo.photoUploadedAt && cached) return { label: "photo cached", tone: "ready" };
-  if (photo.photoUploadedAt) return { label: "photo ready to download", tone: "pending" };
-  return { label: "photo pending upload", tone: "pending" };
+  if (!photo.photoUploadedAt && cached && state.settings.syncBaseUrl) return { label: `${kind} pending upload`, tone: "pending" };
+  if (!photo.photoUploadedAt && cached) return { label: `${kind} saved locally`, tone: "local" };
+  if (photo.photoUploadedAt && cached) return { label: `${kind} cached`, tone: "ready" };
+  if (photo.photoUploadedAt) return { label: `${kind} ready to download`, tone: "pending" };
+  return { label: `${kind} pending upload`, tone: "pending" };
 }
 
 function setPhotoTransferStatus(assetId, status, error = "") {
@@ -1170,7 +1171,9 @@ function fitMapToPoints(map, points, maxZoom = 15) {
   const Leaflet = leaflet();
   if (!Leaflet || !map || !points.length) return;
 
+  const container = map.getContainer();
   requestAnimationFrame(() => {
+    if (!container.isConnected) return;
     map.invalidateSize();
     if (points.length === 1) {
       map.setView(points[0], maxZoom);
@@ -2468,22 +2471,27 @@ function renderEntryPhotos(entry, variant = "summary") {
 
 function renderEntryPhotoItem(photo, entry, variant, index = 0) {
   const url = getCachedPhotoUrl(photo.photoAssetId);
+  const isVideo = (photo.photoMime || "").startsWith("video/");
   const status = photoStatus(photo);
   const statusHtml = status.label && status.tone !== "ready"
     ? `<div class="photo-status ${esc(status.tone)}">${esc(status.label)}</div>`
     : "";
 
   if (url) {
+    const media = isVideo
+      ? `<video class="entry-photo ${esc(variant)}" src="${esc(url)}" ${variant === "detail" ? "controls" : "muted autoplay loop"} playsinline preload="metadata"></video>`
+      : `<img class="entry-photo ${esc(variant)}" src="${esc(url)}" alt="${esc(entry.title || `entry photo ${index + 1}`)}" loading="lazy">`;
     return `
       <figure class="entry-photo-frame ${esc(variant)}">
-        <img class="entry-photo ${esc(variant)}" src="${esc(url)}" alt="${esc(entry.title || `entry photo ${index + 1}`)}" loading="lazy">
+        ${media}
         ${statusHtml}
       </figure>
     `;
   }
 
   ensureEntryPhotoCached(photo).catch(() => {});
-  const label = status.label || (photo.photoUploadedAt ? "loading photo..." : "photo pending upload");
+  const kind = isVideo ? "video" : "photo";
+  const label = status.label || (photo.photoUploadedAt ? `loading ${kind}...` : `${kind} pending upload`);
   return `<div class="entry-photo-placeholder ${esc(variant)}">${esc(label)}</div>`;
 }
 
@@ -3308,8 +3316,8 @@ function renderPhotoField(entry) {
           ${photos.map(renderEditablePhoto).join("")}
         </div>
       ` : ""}
-      <input class="file-input" id="entry-photo-input" type="file" accept="image/*" multiple>
-      <label class="action-link file-picker-link" for="entry-photo-input">${photos.length ? "ADD PHOTOS" : "CHOOSE PHOTOS"}</label>
+      <input class="file-input" id="entry-photo-input" type="file" accept="image/*,video/*" multiple>
+      <label class="action-link file-picker-link" for="entry-photo-input">${photos.length ? "ADD MEDIA" : "CHOOSE MEDIA"}</label>
       <span class="field-helper ${state.entryPhotoError ? "accent" : ""}">${esc(helper)}</span>
     </div>
   `;
@@ -3317,12 +3325,16 @@ function renderPhotoField(entry) {
 
 function renderEditablePhoto(photo) {
   const url = getCachedPhotoUrl(photo.photoAssetId);
+  const isVideo = (photo.photoMime || "").startsWith("video/");
   const status = photoStatus(photo);
-  const label = status.label || "loading photo...";
+  const kind = isVideo ? "video" : "photo";
+  const label = status.label || `loading ${kind}...`;
   return `
     <div class="photo-edit-item">
       ${url
-        ? `<img class="photo-preview" src="${esc(url)}" alt="selected photo">`
+        ? (isVideo
+            ? `<video class="photo-preview" src="${esc(url)}" controls playsinline preload="metadata"></video>`
+            : `<img class="photo-preview" src="${esc(url)}" alt="selected photo">`)
         : `<div class="entry-photo-placeholder form">${esc(label)}</div>`}
       <button class="inline-link" data-action="remove-entry-photo" data-photo-asset-id="${esc(photo.photoAssetId)}" type="button">REMOVE</button>
     </div>
@@ -3408,13 +3420,28 @@ async function selectEntryPhotos(files) {
 
   captureEntryFormDraft();
   clearConfirmation("compose");
-  state.entryPhotoError = `processing ${plural(list.length, "photo")}...`;
   state.entryPhotoNote = "";
-  renderCompose();
+
+  const imageFiles = list.filter(f => f.type.startsWith("image/"));
+  const videoFiles = list.filter(f => f.type.startsWith("video/"));
 
   const processed = [];
-  for (const file of list) {
-    processed.push(await processPhotoFile(file));
+
+  if (imageFiles.length) {
+    state.entryPhotoError = `processing ${plural(imageFiles.length, "photo")}...`;
+    renderCompose();
+    for (const file of imageFiles) {
+      processed.push(await processPhotoFile(file));
+    }
+  }
+
+  for (const file of videoFiles) {
+    state.entryPhotoError = "compressing video...";
+    renderCompose();
+    processed.push(await processVideoFile(file, pct => {
+      state.entryPhotoError = `compressing video... ${Math.round(pct * 100)}%`;
+      renderCompose();
+    }));
   }
 
   state.entryPhotoDrafts = [
@@ -3457,7 +3484,12 @@ async function selectEntryPhotos(files) {
 
   state.entryPhotoNote = photoNotes.join(" | ");
   renderCompose();
-  toast(list.length === 1 ? "photo added" : "photos added");
+
+  const addedParts = [
+    imageFiles.length ? plural(imageFiles.length, "photo") : "",
+    videoFiles.length ? plural(videoFiles.length, "video") : ""
+  ].filter(Boolean);
+  toast(`${addedParts.join(" and ")} added`);
 }
 
 async function saveEntryFromForm() {
