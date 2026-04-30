@@ -153,8 +153,6 @@ export async function processVideoFile(file, onProgress) {
   recorder.ondataavailable = e => { if (e.data?.size > 0) chunks.push(e.data); };
   recorder.start(100);
 
-  video.playbackRate = 4;
-
   const drawLoop = () => {
     if (video.ended || video.paused) return;
     ctx.drawImage(video, 0, 0, width, height);
