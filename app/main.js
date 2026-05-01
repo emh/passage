@@ -107,7 +107,8 @@ const state = {
   geolocationMessage: "checking location...",
   locationPermissionAskedAt: loadedState.locationPermissionAskedAt || "",
   locationEntryPermissionAskedAt: loadedState.locationEntryPermissionAskedAt || "",
-  lastPosition: null
+  lastPosition: null,
+  tripSort: "oldest"
 };
 
 const $ = id => document.getElementById(id);
@@ -2356,7 +2357,7 @@ function renderTrip() {
       ${tripActions ? `<div class="trip-head-actions">${tripActions}</div>` : ""}
     </div>
     <div class="trip-head-dates">
-      <span>${esc(formatDateRange(trip.startIso, trip.endIso).toUpperCase())} | ${plural(days, "day").toUpperCase()} | ${esc(plural(counts.total, "entry", "entries").toUpperCase())}</span>
+      <span>${esc(formatDateRange(trip.startIso, trip.endIso).toUpperCase())} | ${plural(days, "day").toUpperCase()} | ${esc(plural(counts.total, "entry", "entries").toUpperCase())} | <button class="action-link sort-btn" data-action="toggle-trip-sort" type="button">${state.tripSort === "oldest" ? "OLDEST FIRST" : "NEWEST FIRST"}</button></span>
       <span>${esc(statusLabel(trip))}</span>
     </div>
     <div class="trip-title-row">
@@ -2379,7 +2380,10 @@ function renderTimeline(entries) {
     groups.get(key).push(entry);
   }
 
-  return Array.from(groups.values()).map(dayEntries => {
+  const days = Array.from(groups.values());
+  if (state.tripSort === "newest") days.reverse();
+
+  return days.map(dayEntries => {
     const first = dayEntries[0];
     const places = uniqueLabels(dayEntries.map(entryRouteLabel).filter(Boolean));
     return `
@@ -4090,6 +4094,10 @@ function bindEvents() {
     const action = event.target.closest("[data-action]");
     if (action) {
       if (action.dataset.action === "trip-back") return closeTrip();
+      if (action.dataset.action === "toggle-trip-sort") {
+        state.tripSort = state.tripSort === "oldest" ? "newest" : "oldest";
+        return renderTrip();
+      }
       if (action.dataset.action === "open-trip-activity") return openActivityScreen({ tripId: action.dataset.tripId || state.currentTripId });
       if (action.dataset.action === "compose-journal") return runAction(() => openCompose());
       if (action.dataset.action === "share-trip") return runAction(() => openShareScreen({ tripId: state.currentTripId }));
