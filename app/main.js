@@ -2381,7 +2381,7 @@ function renderTimeline(entries) {
   }
 
   const days = Array.from(groups.values());
-  if (state.tripSort === "newest") days.reverse();
+  if (state.tripSort === "newest") { days.reverse(); days.forEach(d => d.reverse()); }
 
   return days.map(dayEntries => {
     const first = dayEntries[0];
