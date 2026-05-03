@@ -1103,6 +1103,21 @@ video.photo-preview {
   margin-bottom: 8px;
 }
 
+.photo-caption-input {
+  margin-top: 6px;
+  margin-bottom: 4px;
+  font-size: 13px;
+  padding: 4px 0;
+}
+
+.entry-photo-caption {
+  margin-top: 8px;
+  color: var(--ink-light);
+  font-size: 13px;
+  font-style: italic;
+  line-height: 1.4;
+}
+
 .field-helper {
   display: block;
   margin-top: 6px;

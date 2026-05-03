@@ -81,6 +81,7 @@ const state = {
   entryLocationError: "",
   entryFormDraft: null,
   entryPhotoDrafts: [],
+  entryPhotoCaptions: {},
   entryPhotoRemovedIds: new Set(),
   entryPhotoError: "",
   entryPhotoNote: "",
@@ -108,7 +109,7 @@ const state = {
   locationPermissionAskedAt: loadedState.locationPermissionAskedAt || "",
   locationEntryPermissionAskedAt: loadedState.locationEntryPermissionAskedAt || "",
   lastPosition: null,
-  tripSort: "oldest"
+  tripSort: "newest"
 };
 
 const $ = id => document.getElementById(id);
@@ -856,7 +857,8 @@ function photoFieldsFromList(photos = []) {
       photoWidth: photo.photoWidth || null,
       photoHeight: photo.photoHeight || null,
       photoSize: photo.photoSize || null,
-      photoUploadedAt: photo.photoUploadedAt || ""
+      photoUploadedAt: photo.photoUploadedAt || "",
+      photoCaption: photo.photoCaption || ""
     }));
   const first = normalized[0] || {};
 
@@ -2485,10 +2487,14 @@ function renderEntryPhotoItem(photo, entry, variant, index = 0) {
     const media = isVideo
       ? `<video class="entry-photo ${esc(variant)}" src="${esc(url)}" ${variant === "detail" ? "controls" : "muted autoplay loop"} playsinline preload="metadata"></video>`
       : `<img class="entry-photo ${esc(variant)}" src="${esc(url)}" alt="${esc(entry.title || `entry photo ${index + 1}`)}" loading="lazy">`;
+    const captionHtml = variant === "detail" && photo.photoCaption
+      ? `<figcaption class="entry-photo-caption">${esc(photo.photoCaption)}</figcaption>`
+      : "";
     return `
       <figure class="entry-photo-frame ${esc(variant)}">
         ${media}
         ${statusHtml}
+        ${captionHtml}
       </figure>
     `;
   }
@@ -2845,6 +2851,7 @@ function openCompose(entryId = "") {
   state.entryLocationError = "";
   state.entryFormDraft = null;
   state.entryPhotoDrafts = [];
+  state.entryPhotoCaptions = {};
   state.entryPhotoRemovedIds = new Set();
   state.entryPhotoError = "";
   state.entryPhotoNote = "";
@@ -2880,6 +2887,7 @@ function closeCompose() {
   state.entryLocationError = "";
   state.entryFormDraft = null;
   state.entryPhotoDrafts = [];
+  state.entryPhotoCaptions = {};
   state.entryPhotoRemovedIds = new Set();
   state.entryPhotoError = "";
   state.entryPhotoNote = "";
@@ -2903,6 +2911,10 @@ function captureEntryFormDraft() {
     url: urlInput?.value || "",
     timestampInput: timeInput?.value || ""
   };
+
+  document.querySelectorAll(".photo-caption-input[data-photo-asset-id]").forEach(input => {
+    state.entryPhotoCaptions[input.dataset.photoAssetId] = input.value.trim();
+  });
 }
 
 function entryFormValue(entry, field, fallback = "") {
@@ -3340,6 +3352,7 @@ function renderEditablePhoto(photo) {
             ? `<video class="photo-preview" src="${esc(url)}" controls playsinline preload="metadata"></video>`
             : `<img class="photo-preview" src="${esc(url)}" alt="selected photo">`)
         : `<div class="entry-photo-placeholder form">${esc(label)}</div>`}
+      <input class="field-input photo-caption-input" type="text" placeholder="caption (optional)" data-photo-asset-id="${esc(photo.photoAssetId)}" value="${esc(state.entryPhotoCaptions[photo.photoAssetId] ?? photo.photoCaption ?? "")}">
       <button class="inline-link" data-action="remove-entry-photo" data-photo-asset-id="${esc(photo.photoAssetId)}" type="button">REMOVE</button>
     </div>
   `;
@@ -3517,7 +3530,13 @@ async function saveEntryFromForm() {
   const title = $("entry-title-input")?.value || "";
   const description = $("entry-description-input")?.value.trim() || "";
   const url = $("entry-url-input")?.value || "";
-  const photos = composePhotoList(currentEntry);
+  document.querySelectorAll(".photo-caption-input[data-photo-asset-id]").forEach(input => {
+    state.entryPhotoCaptions[input.dataset.photoAssetId] = input.value.trim();
+  });
+  const photos = composePhotoList(currentEntry).map(photo => ({
+    ...photo,
+    photoCaption: state.entryPhotoCaptions[photo.photoAssetId] ?? photo.photoCaption ?? ""
+  }));
   const hasPhoto = photos.length > 0;
 
   if (!entryHasRequiredContent({ title, description, url, hasPhoto })) {

@@ -702,7 +702,8 @@ function normalizeEntryPhoto(input = {}) {
     photoWidth: positiveIntegerOrNull(input.photoWidth),
     photoHeight: positiveIntegerOrNull(input.photoHeight),
     photoSize: positiveIntegerOrNull(input.photoSize),
-    photoUploadedAt: validDateTime(input.photoUploadedAt)
+    photoUploadedAt: validDateTime(input.photoUploadedAt),
+    photoCaption: cleanSingleLine(input.photoCaption)
   };
 }
 
