@@ -6,6 +6,7 @@ on:
       - main
     paths:
       - "workers/**"
+      - "app/model.js"
       - "package.json"
       - "package-lock.json"
       - ".github/workflows/deploy-workers.yml"
