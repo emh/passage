@@ -2324,6 +2324,7 @@ function showTrip(tripId) {
   const trip = getTrip(tripId);
   if (!trip) return;
   state.currentTripId = trip.id;
+  state.tripSort = isTripPast(trip) ? "oldest" : "newest";
   renderTrip();
   openOverlay("trip-overlay");
 }
